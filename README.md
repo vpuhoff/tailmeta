@@ -5,22 +5,21 @@ versions after building, read them without running the application, and update
 them without rebuilding. Ed25519 signing is optional.
 
 Requires Python 3.10+. The base installation has no third-party dependencies.
-The package is currently available locally and has not been published to PyPI.
+Published on [PyPI](https://pypi.org/project/tailmeta/).
 
 ## Installation
 
-From the project directory:
+```bash
+python -m pip install tailmeta
+# With signing support:
+python -m pip install 'tailmeta[signing]'
+```
+
+From the project directory (development):
 
 ```bash
 python -m pip install .
-# With signing support:
 python -m pip install '.[signing]'
-```
-
-From a built wheel:
-
-```bash
-python -m pip install packages/tailmeta-*.whl
 ```
 
 ## Command-line usage
