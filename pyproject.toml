@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tailmeta"
+dynamic = ["version"]
+description = "Read and update version metadata in file trailers, with optional Ed25519 signatures"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["version", "metadata", "binary", "trailer", "nuitka"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.optional-dependencies]
+signing = ["cryptography>=41"]
+
+[project.scripts]
+tailmeta = "tailmeta.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/tailmeta/_version.py"
+fallback_version = "0.0.0.dev0"

@@ -1,0 +1,44 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Package and Nuitka build outputs
+/build/
+/dist/
+/packages/
+*.egg-info/
+*.build/
+*.dist/
+*.onefile-build/
+/src/tailmeta/_version.py
+/nuitka-crash-report.xml
+
+# Locally downloaded tools
+/tools/
+
+# Signing keys and local secrets
+/demo-keys/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Local editor and agent configuration
+/.agents/
+/.codex/
+/.claude/
+/.cursor/
+/.idea/
+/.vscode/
+.DS_Store
+*~
+*.swp

@@ -1,0 +1,3 @@
+include Makefile main.py test_onefile.py version_tail.py
+recursive-include tests *.py
+recursive-include ci *.py
