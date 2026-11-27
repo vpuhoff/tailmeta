@@ -95,7 +95,8 @@ class CLITests(unittest.TestCase):
                 ('[1]', 'JSON object'),
                 ('{"version": "1", "version": "2"}', 'duplicate key'),
                 ('{oops', 'not valid JSON'),
-                ('[' * 100000 + ']' * 100000, 'nested too deeply'),
+                # Python <= 3.13 fails while parsing the file, 3.14+ while encoding.
+                ('{"version": "1", "x": ' + '[' * 100000 + ']' * 100000 + '}', 'nested too deeply'),
                 (' ' * (1024 * 1024 + 1), 'exceeds 1 MiB'),
                 ('{"channel": "x"}', 'nonempty string version'),
             ):
