@@ -24,7 +24,7 @@ FOOTER = struct.Struct(">I8s")
 FOOTER_V2 = struct.Struct(">IIHH8s")
 VERSION_TAIL = struct.Struct(">HH8s")
 FORMAT_VERSIONS = (1, 2)
-DEFAULT_FORMAT = 1
+DEFAULT_FORMAT = 2
 MAX_METADATA = 1024 * 1024
 CHUNK = 1024 * 1024
 # Управляющие и форматирующие символы (C0/C1, bidi, разделители строк)

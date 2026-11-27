@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from tailmeta._core import FOOTER, MAGIC, encode_metadata, read_metadata
+from tailmeta._core import encode_footer, encode_metadata, read_metadata
 
 
 def check(condition, message):
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='onefile-test-') as directory:
         metadata = read_metadata(binary)
         check(metadata['sha256'] == hashlib.sha256(base).hexdigest(), 'hash mismatch')
         data = encode_metadata(metadata)
-        check(binary.read_bytes() == base + data + FOOTER.pack(len(data), MAGIC), 'payload changed or trailers accumulated')
+        check(binary.read_bytes() == base + data + encode_footer(data, 2), 'payload changed or trailers accumulated')
         run(binary, version)
         print(f'PASS: signed {version}, verified outside/inside, original bytes preserved')
     signed = binary.read_bytes()

@@ -33,13 +33,13 @@ class FormatTests(unittest.TestCase):
 
     def test_stamp_writes_each_format_exactly(self):
         stamp(self.path, {'version': '1.2.4'})
-        self.assertEqual(self.path.read_bytes(), V1)
-        stamp(self.path, {'version': '1.2.4'}, format_version=2)
-        self.assertEqual(self.path.read_bytes(), V2)
-        stamp(self.path, {'version': '1.2.4'})
-        self.assertEqual(self.path.read_bytes(), V2, 'restamping keeps the current format')
+        self.assertEqual(self.path.read_bytes(), V2, 'new trailers default to v2')
         stamp(self.path, {'version': '1.2.4'}, format_version=1)
         self.assertEqual(self.path.read_bytes(), V1)
+        stamp(self.path, {'version': '1.2.4'})
+        self.assertEqual(self.path.read_bytes(), V1, 'restamping keeps the current format')
+        stamp(self.path, {'version': '1.2.4'}, format_version=2)
+        self.assertEqual(self.path.read_bytes(), V2)
 
     def test_unknown_format_versions_are_refused(self):
         for version, flags in ((3, 0), (1, 0), (0, 0), (2, 1)):

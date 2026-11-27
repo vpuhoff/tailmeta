@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tailmeta._core import FOOTER, MAGIC, MAX_METADATA, encode_metadata, read_metadata, stamp
+from tailmeta._core import FOOTER, MAGIC, MAX_METADATA, encode_footer, encode_metadata, read_metadata, stamp
 
 
 class TailTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class TailTests(unittest.TestCase):
             stamp(self.path, metadata)
             self.assertEqual(read_metadata(self.path), metadata)
             data = encode_metadata(metadata)
-            self.assertEqual(self.path.read_bytes(), self.base + data + FOOTER.pack(len(data), MAGIC))
+            self.assertEqual(self.path.read_bytes(), self.base + data + encode_footer(data, 2))
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o755)
 
     def test_corruption_is_rejected_without_modification(self):
@@ -122,7 +122,7 @@ class SignedTailTests(TailTests):
             self.assertEqual(metadata['version'], version)
             self.assertEqual(metadata['sha256'], hashlib.sha256(self.base).hexdigest())
             data = encode_metadata(read_metadata(self.path))
-            self.assertEqual(self.path.read_bytes(), self.base + data + FOOTER.pack(len(data), MAGIC))
+            self.assertEqual(self.path.read_bytes(), self.base + data + encode_footer(data, 2))
 
     def test_tampering(self):
         from tailmeta._core import verify, generate_keys

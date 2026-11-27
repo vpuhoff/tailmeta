@@ -48,7 +48,7 @@ uses it as the metadata. `--version`, `--commit` and `--channel` override the
 fields of the same name, and `--version` may be omitted when the file provides
 it. The file must be UTF-8 JSON of at most 1 MiB without duplicate keys.
 `stamp --format {1,2}` selects the trailer format (see below); without it the
-format of the existing trailer is kept, and new trailers use v1.
+format of the existing trailer is kept, and new trailers use v2.
 
 `strip` removes the trailer and restores the original bytes, using the same
 atomic replacement as `stamp`. A file without a trailer is left untouched
@@ -101,7 +101,7 @@ strip("app.bin")                       # True if a trailer was removed
 read_metadata_url("https://example.com/app.bin", timeout=10)
 ```
 
-`stamp(..., format_version=None)` keeps the current format, or uses v1 for a
+`stamp(..., format_version=None)` keeps the current format, or uses v2 for a
 file without a trailer. `inspect(path, compute_hash=True)` never raises on a
 damaged trailer: `status` is `absent`, `valid`, `invalid` or `unsupported`,
 and `error` explains the last two. `read_metadata_url(url, timeout=30)` returns
@@ -178,22 +178,24 @@ instead of discarding data written by a newer release.
 
 ### Compatibility matrix
 
-| Trailer in the file       | tailmeta ≤ 0.1.5           | tailmeta 0.2              |
+| Trailer in the file       | tailmeta ≤ 0.1.5           | tailmeta ≥ 0.2            |
 |---------------------------|----------------------------|---------------------------|
 | none                      | read: not found            | read: not found           |
 | v1 (`TAILMETA`)           | read, stamp, verify        | read, stamp, strip, inspect, verify |
 | v2 (`TAILMETV`, format 2) | treated as absent¹         | read, stamp, strip, inspect, verify |
 | `TAILMETV`, format ≥ 3    | treated as absent¹         | `UnsupportedFormatError`; stamp/strip refuse |
 
-| tailmeta 0.2 writes         | when                                   |
+| tailmeta ≥ 0.3 writes       | when                                   |
 |-----------------------------|----------------------------------------|
-| v1                          | default for files without a trailer, or `--format 1` |
+| v2                          | default for files without a trailer, or `--format 2` |
 | the existing trailer format | `stamp` without `--format`             |
-| v2                          | `--format 2` / `format_version=2`      |
+| v1                          | `--format 1` / `format_version=1`      |
+
+tailmeta 0.2.0 wrote v1 by default; since 0.3.0 new trailers use v2.
 
 ¹ Older releases do not know the `TAILMETV` magic: `read` reports that no
 metadata was found, and `stamp` appends a v1 trailer after the v2 one instead
-of replacing it. Keep writing v1 while any consumer still runs ≤ 0.1.5.
+of replacing it. Pass `--format 1` if a consumer still runs ≤ 0.1.5.
 
 The signature covers the JSON only, so a signed trailer stays valid when its
 footer is converted between v1 and v2. `tests/test_formats.py` contains the
