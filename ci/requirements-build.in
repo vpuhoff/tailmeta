@@ -1,0 +1,7 @@
+# Tools for the release build job. Regenerate ci/requirements-build.txt with:
+#   uv pip compile ci/requirements-build.in --generate-hashes --universal \
+#     --python-version 3.12 -o ci/requirements-build.txt
+build
+twine
+setuptools>=80
+setuptools-scm>=8

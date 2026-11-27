@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Nuitka example: read the version; verify only when explicitly requested."""
+"""Nuitka example: read the version; verify only when explicitly requested.
+
+Self-verification demonstrates the API but is not a security boundary: an
+attacker who can replace this binary can also remove the check. Verify from a
+trusted component (installer, updater) that holds its own public key.
+"""
 import argparse
 import os
 import sys
