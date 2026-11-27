@@ -7,7 +7,7 @@ VERSION  ?= 1.2.4
 PRIVATE_KEY ?= demo-keys/private.pem
 PUBLIC_KEY  ?= demo-keys/public.pem
 
-.PHONY: all venv deps build stamp run version verify keygen sign test clean
+.PHONY: all venv deps build stamp run version verify keygen sign test coverage clean
 
 all: build stamp
 
@@ -16,7 +16,7 @@ venv:
 
 deps: venv
 	$(PIP) install -U pip
-	$(PIP) install nuitka zstandard ordered-set
+	$(PIP) install nuitka zstandard ordered-set coverage
 	$(PIP) install -e ".[signing]"
 
 build:
@@ -49,5 +49,13 @@ test: build
 	$(PYTHON) -m unittest discover -s tests -v
 	$(PYTHON) examples/nuitka/test_onefile.py $(BIN)
 
+coverage:
+	rm -f .coverage .coverage.*
+	COVERAGE_FILE="$(CURDIR)/.coverage" COVERAGE_PROCESS_START="$(CURDIR)/.coveragerc" \
+		.venv/bin/coverage run -m unittest discover -s tests -v
+	.venv/bin/coverage combine
+	.venv/bin/coverage report
+	.venv/bin/coverage html
+
 clean:
-	rm -rf $(OUT_DIR) main.build main.dist main.onefile-build
+	rm -rf $(OUT_DIR) main.build main.dist main.onefile-build htmlcov .coverage .coverage.* coverage.json
