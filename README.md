@@ -29,6 +29,10 @@ python -m tailmeta stamp app.bin --version 1.2.4
 python -m tailmeta read app.bin
 python -m tailmeta read app.bin --version-only
 python -m tailmeta stamp app.bin --version 1.2.5 --channel stable --commit abc123
+python -m tailmeta stamp app.bin --metadata metadata.json --version 1.2.6
+python -m tailmeta inspect app.bin
+python -m tailmeta strip app.bin
+python -m tailmeta read https://example.com/downloads/app.bin
 python -m tailmeta --version
 ```
 
@@ -38,6 +42,35 @@ any previous tailmeta trailer. Repeated writes do not accumulate metadata.
 `read` does not verify authenticity, even when the trailer is signed.
 The `read` command exits with code 1 when metadata is absent. File, format,
 and verification errors also produce exit code 1.
+
+`stamp --metadata FILE` loads a JSON object from `FILE` (`-` reads stdin) and
+uses it as the metadata. `--version`, `--commit` and `--channel` override the
+fields of the same name, and `--version` may be omitted when the file provides
+it. The file must be UTF-8 JSON of at most 1 MiB without duplicate keys.
+`stamp --format {1,2}` selects the trailer format (see below); without it the
+format of the existing trailer is kept, and new trailers use v1.
+
+`strip` removes the trailer and restores the original bytes, using the same
+atomic replacement as `stamp`. A file without a trailer is left untouched
+(exit code 0, a note on stderr). A damaged or unsupported trailer is an error,
+because its boundaries cannot be trusted.
+
+`inspect` prints a diagnostic report: file and content sizes, trailer offset
+and size, format version, CRC32 (v2), whether the JSON is canonical, whether
+the trailer is signed, the SHA-256 of the content and whether it matches the
+`sha256` field, and the field names. Damaged trailers are reported with the
+step that failed instead of only an error message. `--json` prints the report
+as JSON, `--no-hash` skips hashing large files. The exit code is 0 only for a
+valid trailer. A matching `sha256` shows integrity, not authenticity: use
+`verify` for that.
+
+`read` also accepts an `http://` or `https://` URL. The trailer is read with
+HTTP Range requests: one request for the last 64 KiB, plus one more when the
+metadata is larger, so the file itself is not downloaded. The server must
+answer with `206 Partial Content`; servers that ignore `Range` or compress the
+response are rejected instead of downloading the whole file. `--timeout`
+sets the network timeout in seconds (default 30). Signatures cannot be
+verified this way, since `verify` hashes the full content.
 
 ## Python API
 
@@ -58,6 +91,23 @@ overrides); trailers with such a version are rejected on read as well.
 `read_metadata(path)` returns a dictionary, or `None` if no trailer is found.
 A recognized but malformed trailer raises `ValueError`; file errors raise
 `OSError`. Paths may be strings or `pathlib.Path` objects.
+
+```python
+from tailmeta import inspect, read_metadata_url, strip
+
+stamp("app.bin", {"version": "1.2.4"}, format_version=2)
+report = inspect("app.bin")            # dict; report["status"] == "valid"
+strip("app.bin")                       # True if a trailer was removed
+read_metadata_url("https://example.com/app.bin", timeout=10)
+```
+
+`stamp(..., format_version=None)` keeps the current format, or uses v1 for a
+file without a trailer. `inspect(path, compute_hash=True)` never raises on a
+damaged trailer: `status` is `absent`, `valid`, `invalid` or `unsupported`,
+and `error` explains the last two. `read_metadata_url(url, timeout=30)` returns
+the same untrusted data as `read_metadata`; network errors raise `OSError`.
+A trailer with an unknown format version or flags raises
+`UnsupportedFormatError`, a subclass of `ValueError`.
 
 ## Optional signing
 
@@ -106,13 +156,51 @@ signature.
 - Keep the private key outside the repository and the build output; it is
   stored unencrypted, so protect it with file permissions or a secret store.
 
-## Trailer format v1
+## Trailer formats
 
 ```text
-[original file][UTF-8 JSON][JSON length: uint32 big endian][TAILMETA: 8 bytes]
+v1: [original file][UTF-8 JSON][length: uint32][TAILMETA]
+v2: [original file][UTF-8 JSON][CRC32: uint32][length: uint32][format: uint16 = 2][flags: uint16 = 0][TAILMETV]
 ```
 
-The trailer ends with the eight magic bytes `TAILMETA`.
+All integers are big endian. v1 ends with the magic bytes `TAILMETA` and has
+no version field. v2 and every later format end with `TAILMETV`, preceded by
+the format version and flags: these last 12 bytes keep the same layout in all
+future versions, so a reader always learns the version before interpreting
+anything else. The layout before them belongs to the specific version.
+In v2 the CRC32 (zlib polynomial) covers the JSON bytes and detects
+corruption that still leaves valid JSON. Flags are reserved; v2 requires
+zero.
+
+A reader that finds `TAILMETV` with a format version or flags it does not
+know raises `UnsupportedFormatError`. `stamp` and `strip` refuse such files
+instead of discarding data written by a newer release.
+
+### Compatibility matrix
+
+| Trailer in the file       | tailmeta ≤ 0.1.5           | tailmeta 0.2              |
+|---------------------------|----------------------------|---------------------------|
+| none                      | read: not found            | read: not found           |
+| v1 (`TAILMETA`)           | read, stamp, verify        | read, stamp, strip, inspect, verify |
+| v2 (`TAILMETV`, format 2) | treated as absent¹         | read, stamp, strip, inspect, verify |
+| `TAILMETV`, format ≥ 3    | treated as absent¹         | `UnsupportedFormatError`; stamp/strip refuse |
+
+| tailmeta 0.2 writes         | when                                   |
+|-----------------------------|----------------------------------------|
+| v1                          | default for files without a trailer, or `--format 1` |
+| the existing trailer format | `stamp` without `--format`             |
+| v2                          | `--format 2` / `format_version=2`      |
+
+¹ Older releases do not know the `TAILMETV` magic: `read` reports that no
+metadata was found, and `stamp` appends a v1 trailer after the v2 one instead
+of replacing it. Keep writing v1 while any consumer still runs ≤ 0.1.5.
+
+The signature covers the JSON only, so a signed trailer stays valid when its
+footer is converted between v1 and v2. `tests/test_formats.py` contains the
+exact bytes of both formats; they must keep reading in every release.
+
+### Encoding
+
 JSON is limited to 1 MiB. Keys are sorted, and serialization uses
 `ensure_ascii=False`, `allow_nan=False`, and `separators=(",", ":")`.
 The signed message is `b"TAILMETA\x00" + JSON`, excluding the `signature` field.
