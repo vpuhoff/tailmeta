@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -31,6 +32,20 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(run('read', path, '--version-only').stdout.strip(), version)
             self.assertEqual(f'tailmeta {package_version("tailmeta")}', run('--version').stdout.strip())
 
+    def test_read_escapes_control_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'app.bin'
+            path.write_bytes(b'original data')
+            channel = 'a\x1b[31m\x9b\u2028\U000e0001тест'
+            result = self._run(directory, 'stamp', path, '--version', '1', '--channel', channel)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = self._run(directory, 'read', path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotRegex(result.stdout.strip(), '[\x00-\x1f\x7f-\x9f\u2028\U000e0001]')
+            self.assertIn('тест', result.stdout)
+            self.assertEqual(json.loads(result.stdout)['channel'], channel)
+
+    @unittest.skipUnless(importlib.util.find_spec('cryptography'), 'requires signing extra')
     def test_keygen_stamp_verify_and_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -61,16 +76,6 @@ class CLITests(unittest.TestCase):
             self.assertEqual(payload['channel'], 'stable')
             self.assertEqual(payload['commit'], 'abc123')
             self.assertNotIn('signature', payload)
-
-            other = root / 'other.bin'
-            other.write_bytes(b'original data')
-            result = run('stamp', other, '--version', '1', '--channel', 'a\x1b[31m\x9b\u2028\U000e0001тест')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            result = run('read', other)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotRegex(result.stdout.strip(), '[\x00-\x1f\x7f-\x9f\u2028\U000e0001]')
-            self.assertIn('тест', result.stdout)
-            self.assertEqual(json.loads(result.stdout)['channel'], 'a\x1b[31m\x9b\u2028\U000e0001тест')
 
             missing = run('verify', path, '--public-key', root / 'missing.pem')
             self.assertEqual(missing.returncode, 1)
