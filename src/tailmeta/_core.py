@@ -1,4 +1,4 @@
-"""Формат v1: [бинарник][UTF-8 JSON][uint32 big endian][MYAPPv01]."""
+"""Формат v1: [бинарник][UTF-8 JSON][uint32 big endian][TAILMETA]."""
 import base64
 import hashlib
 import json
@@ -8,7 +8,7 @@ import shutil
 import struct
 import tempfile
 
-MAGIC = b"MYAPPv01"
+MAGIC = b"TAILMETA"
 FOOTER = struct.Struct(">I8s")
 MAX_METADATA = 1024 * 1024
 

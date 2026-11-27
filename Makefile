@@ -1,13 +1,11 @@
 PYTHON   := .venv/bin/python
 PIP      := .venv/bin/pip
-SRC      := main.py
+SRC      := examples/nuitka/main.py
 OUT_DIR  := dist
 BIN      := $(OUT_DIR)/main.bin
 VERSION  ?= 1.2.4
 PRIVATE_KEY ?= demo-keys/private.pem
-PUBLIC_KEY  ?= $(BIN).pub.pem
-
-export PATH := $(CURDIR)/tools/bin:$(PATH)
+PUBLIC_KEY  ?= demo-keys/public.pem
 
 .PHONY: all venv deps build stamp run version verify keygen sign test clean
 
@@ -49,7 +47,7 @@ version: $(BIN)
 
 test: build
 	$(PYTHON) -m unittest discover -s tests -v
-	$(PYTHON) test_onefile.py $(BIN)
+	$(PYTHON) examples/nuitka/test_onefile.py $(BIN)
 
 clean:
 	rm -rf $(OUT_DIR) main.build main.dist main.onefile-build

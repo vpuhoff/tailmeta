@@ -1,29 +1,29 @@
 # tailmeta
 
-Версия и метаданные в хвосте готового файла. Записывайте версию после сборки,
-читайте её без запуска приложения и заменяйте без пересборки.
-Подпись Ed25519 — необязательное расширение.
+Store version information and metadata in the trailer of a built file. Assign
+versions after building, read them without running the application, and update
+them without rebuilding. Ed25519 signing is optional.
 
-Python 3.10+. Базовая установка не требует сторонних библиотек.
-Пакет подготовлен локально; в PyPI пока не опубликован.
+Requires Python 3.10+. The base installation has no third-party dependencies.
+The package is currently available locally and has not been published to PyPI.
 
-## Установка
+## Installation
 
-Из каталога проекта:
+From the project directory:
 
 ```bash
 python -m pip install .
-# С поддержкой подписи:
+# With signing support:
 python -m pip install '.[signing]'
 ```
 
-Из собранного wheel:
+From a built wheel:
 
 ```bash
 python -m pip install packages/tailmeta-*.whl
 ```
 
-## Командная строка
+## Command-line usage
 
 ```bash
 python -m tailmeta stamp app.bin --version 1.2.4
@@ -33,12 +33,12 @@ python -m tailmeta stamp app.bin --version 1.2.5 --channel stable --commit abc12
 python -m tailmeta --version
 ```
 
-После установки также доступна команда `tailmeta` с теми же аргументами.
-`stamp` требует существующий файл, сохраняет его исходные байты и заменяет
-предыдущий хвост. Повторная запись не накапливает метаданные.
-`read` не проверяет подлинность даже подписанного хвоста.
-При отсутствии метаданных CLI `read` завершается с кодом 1; ошибки чтения,
-формата и проверки также возвращают код 1.
+Installation also provides the `tailmeta` command with the same arguments.
+`stamp` requires an existing file, preserves its original bytes, and replaces
+any previous tailmeta trailer. Repeated writes do not accumulate metadata.
+`read` does not verify authenticity, even when the trailer is signed.
+The `read` command exits with code 1 when metadata is absent. File, format,
+and verification errors also produce exit code 1.
 
 ## Python API
 
@@ -50,14 +50,14 @@ metadata = read_metadata("app.bin")
 print(metadata["version"] if metadata else "unknown")
 ```
 
-`stamp(path, metadata, private_key=None)` принимает словарь с обязательной
-непустой строкой `version` и дополнительными JSON-полями. `sha256` и
-`signature` зарезервированы и генерируются при подписании.
-`read_metadata(path)` возвращает словарь либо `None`, если хвоста нет.
-Некорректный распознанный хвост вызывает `ValueError`, ошибки файлов — `OSError`.
-Поддерживаются строки путей и `pathlib.Path`.
+`stamp(path, metadata, private_key=None)` accepts a dictionary containing a
+required nonempty `version` string and optional additional JSON fields.
+`sha256` and `signature` are reserved and generated during signing.
+`read_metadata(path)` returns a dictionary, or `None` if no trailer is found.
+A recognized but malformed trailer raises `ValueError`; file errors raise
+`OSError`. Paths may be strings or `pathlib.Path` objects.
 
-## Необязательная подпись
+## Optional signing
 
 ```bash
 python -m tailmeta keygen --private-key private.pem --public-key public.pem
@@ -73,38 +73,44 @@ stamp("app.bin", {"version": "1.2.4"}, private_key="private.pem")
 metadata = verify("app.bin", public_key="public.pem")
 ```
 
-Для этих операций установите extra `signing`. Без него запись и чтение версии
-продолжают работать; операции подписи сообщают об отсутствующей зависимости.
-`verify` проверяет подпись всех полей и SHA-256 исходной части файла, возвращает
-проверенные поля без `signature`. Неподписанные файлы отклоняются.
-Ключи Ed25519 хранятся в PEM; закрытый ключ создаётся незашифрованным с правами
-0600. `keygen` не перезаписывает существующие ключи.
-Повторный `stamp` без ключа заменяет подписанный хвост неподписанным.
-Подписание удостоверяет текущие байты, не проверяя прежнюю подпись.
+Install the `signing` extra to use these operations. Without it, version reads
+and writes still work; signing operations report the missing dependency.
+`verify` checks the signature over all metadata fields and the SHA-256 hash of
+the original file content, then returns the verified fields without
+`signature`. Unsigned files are rejected.
 
-## Формат v1
+Ed25519 keys use PEM encoding. Private keys are created unencrypted with mode
+0600. `keygen` refuses to overwrite existing keys.
+Running `stamp` again without a key replaces a signed trailer with an unsigned
+one. Signing authenticates the current bytes without checking any previous
+signature.
+
+## Trailer format v1
 
 ```text
-[исходный файл][JSON UTF-8][длина JSON: uint32 big endian][MYAPPv01: 8 байт]
+[original file][UTF-8 JSON][JSON length: uint32 big endian][TAILMETA: 8 bytes]
 ```
 
-Сигнатура `MYAPPv01` сохранена для совместимости с исходным экспериментом.
-JSON ограничен 1 МиБ. Поля сортируются, сериализация использует
-`ensure_ascii=False`, `allow_nan=False`, `separators=(",", ":")`.
-Подписывается `b"MYAPPv01\x00" + JSON` всех полей, кроме `signature`.
-Это Python-сериализация, не JCS. Подпись хранится в Base64; хеш — SHA-256
-исходной части до JSON, в шестнадцатеричном виде.
+The trailer ends with the eight magic bytes `TAILMETA`.
+JSON is limited to 1 MiB. Keys are sorted, and serialization uses
+`ensure_ascii=False`, `allow_nan=False`, and `separators=(",", ":")`.
+The signed message is `b"TAILMETA\x00" + JSON`, excluding the `signature` field.
+This uses Python JSON serialization, not JCS. The signature is Base64-encoded;
+`sha256` is the hexadecimal SHA-256 digest of the original content before the
+JSON trailer.
 
-Запись копирует исходную часть в соседний временный файл и атомарно заменяет
-целевой файл, сохраняя режим доступа. Символьные ссылки разрешаются до цели.
-Владелец, ACL, расширенные атрибуты и связи hard link не сохраняются специально.
-Параллельная запись не поддерживается. Повреждённую сигнатуру нельзя отличить
-от отсутствующего хвоста. Старые текстовые `MYAPP_VER:` не удаляются.
+Writing copies the original content into a temporary file in the same directory
+and atomically replaces the destination, preserving its permission bits.
+Symbolic links are resolved to their targets. Ownership, ACLs, extended
+attributes, and hard-link relationships are not explicitly preserved.
+Concurrent writes are unsupported. Damaged magic bytes cannot be distinguished
+from an absent trailer.
 
-## Пример с Nuitka
+## Nuitka example
 
-`main.py` читает версию собственного onefile; без метаданных выводит `unknown`.
-Проверка подписи включается явно через `--public-key`.
+`examples/nuitka/main.py` reads the version of its own onefile executable and
+prints `unknown` when metadata is absent. Signature verification is enabled
+explicitly with `--public-key`.
 
 ```bash
 make deps
@@ -113,33 +119,35 @@ make stamp VERSION=1.2.4
 make version
 make run
 
-# Необязательно, демонстрационные ключи:
+# Optional: generate demo keys and sign the executable.
 make keygen
 make sign VERSION=1.2.4
 make verify
-./dist/main.bin --public-key dist/main.bin.pub.pem
+./dist/main.bin --public-key demo-keys/public.pem
 ```
 
-Makefile использует `.venv/bin/python`. `make deps` устанавливает пакет в
-editable-режиме с extra `signing` и инструменты для эксперимента с Nuitka.
-`version_tail.py` оставлен как совместимый запуск старой CLI после установки пакета.
+The Makefile uses `.venv/bin/python`. `make deps` installs the package in editable
+mode with the `signing` extra, along with the tools for the Nuitka example.
+The example requires gcc and a system installation of `patchelf`
+(on Ubuntu: `sudo apt-get install gcc patchelf`).
 
-## Разработка и сборка пакета
+## Development and packaging
 
 ```bash
 python -m pip install -e '.[signing]'
 python -m unittest discover -s tests -v
 python -m pip install build
 python -m build --outdir packages
-make test  # дополнительно пересобирает и проверяет настоящий onefile
+make test  # Also rebuild and test a real onefile executable.
 ```
 
-Wheel содержит только `tailmeta`, без тестовых ключей, бинарников и Nuitka.
-`make test` работает с временными копиями, проверяет версии без подписи,
-подпись, подмену данных и ключей. Оставляет свежий бинарник без хвоста.
-`make clean` удаляет dist, включая демонстрационный открытый ключ.
+The wheel contains only `tailmeta`, without test keys, compiled executables,
+or Nuitka. `make test` uses temporary copies to test unsigned versions,
+signatures, modified data, and incorrect keys. It leaves a freshly built
+executable without a trailer. `make clean` removes `dist`; demo keys remain
+in `demo-keys/`.
 
-Для окружения с недоступными системными кешами:
+If system cache directories are not writable:
 
 ```bash
 mkdir -p /tmp/nuitka-version-test-ccache-tmp
@@ -148,62 +156,74 @@ CCACHE_DIR=/tmp/nuitka-version-test-ccache \
 CCACHE_TEMPDIR=/tmp/nuitka-version-test-ccache-tmp make test
 ```
 
-## Совместимость
+## Compatibility
 
-Добавлять хвост можно только к форматам, допускающим посторонние байты в конце.
-Работа с Nuitka onefile проверяется на Linux; это не обещание совместимости
-с любым исполняемым файлом. При обновлении загрузчика повторяйте проверку.
-Системные подписи и хеши всего файла нужно формировать после записи хвоста.
-Доверие к открытому ключу и проверяющему коду обеспечивает развёртывание;
-самопроверка не заменяет проверку доверенным launcher до запуска.
+Append trailers only to formats that tolerate extra bytes at the end of the
+file. Nuitka onefile behavior is tested on Linux; this does not guarantee
+compatibility with every executable format. Repeat the integration test when
+updating the loader.
 
-## GitHub Actions и PyPI
+Apply platform signatures and compute whole-file hashes after writing the
+trailer. Deployment must establish trust in the public key and verification
+code. Self-verification does not replace verification by a trusted launcher
+before execution.
 
-Workflow `.github/workflows/publish.yml` выполняется на push, pull request и
-ручном запуске. Он собирает wheel **из sdist**, проверяет метаданные через
-`twine check --strict`, затем тестирует этот wheel в чистых окружениях на
-Python 3.10–3.14 с extra `signing` и без него. Отдельный job собирает настоящий
-Nuitka onefile на Linux и проверяет версию и подпись.
+## GitHub Actions and PyPI
 
-Публикация выполняется только при push тега `vX.Y.Z`, после успешного
-завершения всех проверок. Допускаются prerelease-теги, например `v0.2.0rc1`.
-Артефакты публикуются те же, которые прошли тесты. OIDC-разрешение
-`id-token: write` получает только job публикации; API-токен PyPI не нужен.
-Ручной запуск workflow и обычные коммиты ничего не публикуют.
+The workflow in `.github/workflows/publish.yml` runs on pushes, pull requests,
+and manual dispatches. It builds the wheel **from the sdist**, validates package
+metadata with `twine check --strict`, and tests that wheel in clean environments
+on Python 3.10–3.14, both with and without the `signing` extra. A separate job
+builds a real Nuitka onefile executable on Linux and tests version reading and
+signature verification.
 
-### Автоверсионирование
+Publishing runs only when a `vX.Y.Z` tag is pushed and all checks have passed.
+Prerelease tags such as `v0.2.0rc1` are also supported. The published artifacts
+are the same ones that passed the tests. Only the publishing job receives the
+OIDC permission `id-token: write`; no PyPI API token is required. Manual workflow
+runs and ordinary branch commits do not publish packages.
 
-`setuptools-scm` получает версию из Git-тегов; вручную редактировать версию
-в `pyproject.toml` и Python-коде не нужно. Это версионирование **по тегам**:
-workflow не создаёт теги и не выбирает major/minor/patch за разработчика.
+### Automatic versioning
+
+`setuptools-scm` derives the version from Git tags, so there is no need to edit
+versions manually in `pyproject.toml` or Python code. Versioning is **tag-based**:
+the workflow does not create tags or choose major, minor, or patch increments.
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-На теге получается версия `0.1.0`. Между тегами — автоматически вычисляемая
-версия разработки. При сборке генерируется `src/tailmeta/_version.py`, который
-попадает в пакет и доступен внутри Nuitka без Git и setuptools-scm во время
-работы. Файл не нужно коммитить. Для исходников без Git-истории и метаданных
-sdist используется `0.0.0.dev0`; такой fallback не пройдёт проверку релизного
-тега. Версия установленного пакета доступна через `tailmeta.__version__` и
+This tag produces version `0.1.0`. Commits between tags receive an automatically
+calculated development version. Building generates `src/tailmeta/_version.py`,
+which is included in the package and works inside Nuitka without Git or
+setuptools-scm at runtime. Do not commit this generated file.
+
+Source trees without Git history or sdist version metadata use the fallback
+`0.0.0.dev0`; this fallback will not pass the release-tag check. The installed
+package version is available through `tailmeta.__version__` and
 `python -m tailmeta --version`.
 
-### Однократная настройка Trusted Publishing
+### One-time Trusted Publishing setup
 
-1. Разместите проект в GitHub и создайте environment **`pypi`** в настройках
-   репозитория. При необходимости ограничьте его релизными тегами.
-2. В PyPI добавьте Trusted Publisher для существующего `tailmeta`, либо
-   Pending Publisher для первого выпуска через
-   https://pypi.org/manage/account/publishing/ . Укажите:
-   - PyPI project name: `tailmeta`;
-   - GitHub owner и repository: фактические владелец и имя репозитория;
-   - workflow filename: **`publish.yml`**;
-   - environment name: **`pypi`**.
-3. Отправьте релизный тег. GitHub Actions выполнит тесты и публикацию.
+1. Host the project on GitHub and create an environment named **`pypi`** in the
+   repository settings. Restrict it to release tags if needed.
+2. On PyPI, add a Trusted Publisher to an existing `tailmeta` project, or create
+   a Pending Publisher for the first release through the
+   [publishing settings](https://pypi.org/manage/account/publishing/).
+   Use the following values:
 
-Конфигурация workflow сама по себе не регистрирует доверие в аккаунте PyPI.
-Опубликованные версии PyPI не перезаписываются: для следующего выпуска
-создайте новый тег. Полный справочник:
-https://docs.pypi.org/trusted-publishers/using-a-publisher/ .
+   | Setting | Value |
+   | --- | --- |
+   | PyPI project name | `tailmeta` |
+   | GitHub owner and repository | Your actual repository owner and name |
+   | Workflow filename | `publish.yml` |
+   | Environment name | `pypi` |
+
+3. Push a release tag. GitHub Actions will run the tests and publish the package.
+
+Adding the workflow does not register a Trusted Publisher in your PyPI account.
+Published PyPI versions cannot be overwritten; create a new tag for each
+subsequent release. See the
+[Trusted Publishing documentation](https://docs.pypi.org/trusted-publishers/using-a-publisher/)
+for details.

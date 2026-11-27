@@ -85,8 +85,8 @@ jobs:
           python -m pip install packages/*.whl
       - name: Build and test a real onefile executable
         run: |
-          python -m nuitka --onefile --assume-yes-for-downloads --output-dir=dist main.py
-          python test_onefile.py dist/main.bin
+          python -m nuitka --onefile --assume-yes-for-downloads --output-dir=dist examples/nuitka/main.py
+          python examples/nuitka/test_onefile.py dist/main.bin
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
