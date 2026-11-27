@@ -2,7 +2,22 @@
 import argparse
 import json
 from . import __version__
-from ._core import generate_keys, read_metadata, stamp, verify
+from ._core import generate_keys, is_unsafe_char, read_metadata, stamp, verify
+
+
+def _escape(char):
+    if not is_unsafe_char(char):
+        return char
+    code = ord(char)
+    if code > 0xFFFF:
+        code -= 0x10000
+        return f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}"
+    return f"\\u{code:04x}"
+
+
+def dump_json(value):
+    """JSON с читаемым Unicode, но без сырых управляющих символов терминала."""
+    return "".join(map(_escape, json.dumps(value, ensure_ascii=False)))
 
 
 def main():
@@ -29,14 +44,14 @@ def main():
         if args.command == "stamp":
             stamp(args.path, {key: getattr(args, key) for key in ("version", "commit", "channel") if getattr(args, key) is not None}, args.private_key)
         elif args.command == "verify":
-            print(json.dumps(verify(args.path, args.public_key), ensure_ascii=False))
+            print(dump_json(verify(args.path, args.public_key)))
         elif args.command == "keygen":
             generate_keys(args.private_key, args.public_key)
         else:
             metadata = read_metadata(args.path)
             if metadata is None:
                 parser.exit(1, "metadata not found\n")
-            print(metadata["version"] if args.version_only else json.dumps(metadata, ensure_ascii=False))
+            print(metadata["version"] if args.version_only else dump_json(metadata))
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"error: {exc}\n")
 

@@ -51,6 +51,9 @@ print(metadata["version"] if metadata else "unknown")
 
 `stamp(path, metadata, private_key=None)` accepts a dictionary containing a
 required nonempty `version` string and optional additional JSON fields.
+The `version` string must not contain control or formatting characters
+(Unicode categories Cc, Cf, Zl, Zp: newlines, escape sequences, bidi
+overrides); trailers with such a version are rejected on read as well.
 `sha256` and `signature` are reserved and generated during signing.
 `read_metadata(path)` returns a dictionary, or `None` if no trailer is found.
 A recognized but malformed trailer raises `ValueError`; file errors raise
@@ -76,13 +79,32 @@ Install the `signing` extra to use these operations. Without it, version reads
 and writes still work; signing operations report the missing dependency.
 `verify` checks the signature over all metadata fields and the SHA-256 hash of
 the original file content, then returns the verified fields without
-`signature`. Unsigned files are rejected.
+`signature`. Unsigned files are rejected, as are signed trailers whose JSON
+bytes differ from the canonical encoding described below.
 
 Ed25519 keys use PEM encoding. Private keys are created unencrypted with mode
 0600. `keygen` refuses to overwrite existing keys.
 Running `stamp` again without a key replaces a signed trailer with an unsigned
 one. Signing authenticates the current bytes without checking any previous
 signature.
+
+## Security model
+
+- `read` and `read_metadata` return **untrusted** data. Anyone who can modify
+  the file can write any metadata. Use `verify` when authenticity matters.
+  The CLI escapes control characters in JSON output, and `--version-only`
+  prints only versions that passed the character check above.
+- `verify` proves that the trailer and the original bytes were signed by the
+  holder of the private key. Run it in a **trusted** component (installer,
+  updater, release pipeline) that ships its own copy of the public key.
+  A program that verifies itself, like the Nuitka example below, is not a
+  security boundary: whoever can replace the binary can also remove the check
+  or point it at a different key.
+- There is no rollback protection: every binary that was ever signed keeps
+  verifying. Compare the verified `version` against the installed one if
+  downgrades must be refused.
+- Keep the private key outside the repository and the build output; it is
+  stored unencrypted, so protect it with file permissions or a secret store.
 
 ## Trailer format v1
 
@@ -109,7 +131,8 @@ from an absent trailer.
 
 `examples/nuitka/main.py` reads the version of its own onefile executable and
 prints `unknown` when metadata is absent. Signature verification is enabled
-explicitly with `--public-key`.
+explicitly with `--public-key`. This demonstrates the API only: see the
+security model above for why self-verification does not stop tampering.
 
 ```bash
 make deps

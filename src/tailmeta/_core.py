@@ -7,39 +7,54 @@ from pathlib import Path
 import shutil
 import struct
 import tempfile
+import unicodedata
 
 MAGIC = b"TAILMETA"
 FOOTER = struct.Struct(">I8s")
 MAX_METADATA = 1024 * 1024
+# Управляющие и форматирующие символы (C0/C1, bidi, разделители строк)
+# недопустимы в version: она печатается в терминал и подставляется в скрипты.
+UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+
+
+def is_unsafe_char(char):
+    return unicodedata.category(char) in UNSAFE_CATEGORIES
 
 
 def encode_metadata(metadata):
     if not isinstance(metadata, dict) or not isinstance(metadata.get("version"), str) or not metadata["version"].strip():
         raise ValueError("metadata must contain a nonempty string version")
-    data = json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if any(map(is_unsafe_char, metadata["version"])):
+        raise ValueError("version must not contain control or formatting characters")
+    try:
+        data = json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except RecursionError as exc:
+        raise ValueError("metadata is nested too deeply") from exc
     if len(data) > MAX_METADATA:
         raise ValueError("metadata exceeds 1 MiB")
     return data
 
 
 def _read(stream):
+    """Вернуть (metadata, начало трейлера, канонична ли запись JSON)."""
     size = stream.seek(0, os.SEEK_END)
     if size < FOOTER.size:
-        return None, size
+        return None, size, False
     stream.seek(-FOOTER.size, os.SEEK_END)
     length, magic = FOOTER.unpack(stream.read(FOOTER.size))
     if magic != MAGIC:
-        return None, size
+        return None, size, False
     if not 0 < length <= min(MAX_METADATA, size - FOOTER.size):
         raise ValueError("invalid metadata length")
     start = size - FOOTER.size - length
     stream.seek(start)
+    raw = stream.read(length)
     try:
-        metadata = json.loads(stream.read(length).decode("utf-8"))
-        encode_metadata(metadata)
-    except (ValueError, UnicodeError) as exc:
+        metadata = json.loads(raw.decode("utf-8"))
+        canonical = encode_metadata(metadata) == raw
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise ValueError("invalid metadata JSON") from exc
-    return metadata, start
+    return metadata, start, canonical
 
 
 def read_metadata(path):
@@ -92,9 +107,11 @@ def verify(path, public_key):
     exceptions, _, _ = _crypto()
     key = load_key(public_key)
     with open(path, "rb") as stream:
-        metadata, base_size = _read(stream)
+        metadata, base_size, canonical = _read(stream)
         if metadata is None or "signature" not in metadata:
             raise ValueError("signed metadata required")
+        if not canonical:
+            raise ValueError("signed metadata is not canonically encoded")
         signed = dict(metadata)
         signature = signed.pop("signature")
         if not isinstance(signature, str):
@@ -127,7 +144,7 @@ def stamp(path, metadata, private_key=None):
     temporary = None
     try:
         with path.open("rb") as source:
-            _, base_size = _read(source)
+            _, base_size, _ = _read(source)
             source.seek(0)
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as target:
                 temporary = Path(target.name)

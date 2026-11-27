@@ -3,3 +3,4 @@ include Makefile
 recursive-include examples *.py
 recursive-include tests *.py
 recursive-include ci *.py
+include ci/requirements-build.in ci/requirements-build.txt

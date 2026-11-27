@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -47,6 +48,30 @@ class TailTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 stamp(self.path, metadata)
             self.assertEqual(self.path.read_bytes(), self.base)
+
+    def test_deeply_nested_json_is_value_error(self):
+        data = b'{"version":"1","x":' + b'[' * 200000 + b']' * 200000 + b'}'
+        self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+        with self.assertRaisesRegex(ValueError, 'invalid metadata JSON'):
+            read_metadata(self.path)
+        nested = []
+        for _ in range(200000):
+            nested = [nested]
+        with self.assertRaisesRegex(ValueError, 'nested too deeply'):
+            stamp(self.path, {'version': '1', 'x': nested})
+
+    def test_unsafe_version_characters_are_rejected(self):
+        for version in ('1.0\n', '1\x1b]0;x\x07', '1\x9b31m', '1\u202e', '1\u2028', '1\x00', '1\U000e0001'):
+            with self.assertRaisesRegex(ValueError, 'control or formatting'):
+                stamp(self.path, {'version': version})
+            self.assertEqual(self.path.read_bytes(), self.base)
+            data = ('{"version":%s}' % json.dumps(version)).encode()
+            self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+            with self.assertRaisesRegex(ValueError, 'invalid metadata JSON'):
+                read_metadata(self.path)
+            self.path.write_bytes(self.base)
+        stamp(self.path, {'version': '1.0-тест+ü'})
+        self.assertEqual(read_metadata(self.path)['version'], '1.0-тест+ü')
 
     def test_source_changed_while_stamping(self):
         real_open = Path.open
@@ -121,6 +146,23 @@ class SignedTailTests(TailTests):
         stamp(self.path, {'version': 'unsigned'})
         with self.assertRaises(ValueError):
             verify(self.path, self.public)
+
+    def test_non_canonical_signed_trailer_is_rejected(self):
+        from tailmeta._core import verify
+        stamp(self.path, {'version': '1.2.4', 'channel': 'stable'}, self.private)
+        metadata = read_metadata(self.path)
+        variants = [
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            json.dumps(metadata, separators=(',', ':'), sort_keys=True).replace('stable', '\\u0073table'),
+            json.dumps(dict(reversed(list(metadata.items()))), separators=(',', ':')),
+        ]
+        for text in variants:
+            data = text.encode()
+            self.assertEqual(json.loads(data), metadata)
+            self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+            self.assertEqual(read_metadata(self.path), metadata)
+            with self.assertRaisesRegex(ValueError, 'canonically'):
+                verify(self.path, self.public)
 
     def test_key_files_and_reserved_fields(self):
         from tailmeta._core import generate_keys
