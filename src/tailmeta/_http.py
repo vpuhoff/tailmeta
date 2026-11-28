@@ -17,6 +17,11 @@ class RangeReader:
 
     Первый запрос забирает последние TAIL_BLOCK байт, поэтому небольшие
     метаданные читаются за один запрос.
+
+    Валидаторы первого ответа (ETag, Last-Modified) запоминаются. Следующие
+    запросы отправляют сильный ETag в If-Range, и каждый ответ обязан вернуть
+    те же валидаторы и тот же полный размер: иначе файл подменили между
+    запросами, и склеенные куски принадлежали бы разным версиям.
     """
 
     def __init__(self, url, timeout=30, user_agent="tailmeta"):
@@ -27,13 +32,19 @@ class RangeReader:
         self.position = 0
         self.cache_start, self.cache = 0, b""
         self.requests = 0
+        self.validators = None
 
     def _fetch(self, spec):
-        request = urllib.request.Request(self.url, headers={
+        headers = {
             "Range": f"bytes={spec}",
             "Accept-Encoding": "identity",
             "User-Agent": self.user_agent,
-        })
+        }
+        etag = self.validators and self.validators[0]
+        # If-Range допускает только сильный ETag (RFC 9110, 13.1.5).
+        if etag and not etag.startswith("W/"):
+            headers["If-Range"] = etag
+        request = urllib.request.Request(self.url, headers=headers)
         self.requests += 1
         try:
             response = urllib.request.urlopen(request, timeout=self.timeout)
@@ -44,6 +55,8 @@ class RangeReader:
                 return 0, b"", 0
             raise
         with response:
+            if response.status == 200 and "If-Range" in headers:
+                raise ValueError("remote file changed while reading")
             if response.status != 206:
                 raise ValueError("server does not support HTTP range requests")
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
@@ -54,6 +67,10 @@ class RangeReader:
             start, end, total = map(int, match.groups())
             if end < start or end >= total:
                 raise ValueError("invalid Content-Range header")
+            validators = (response.headers.get("ETag"), response.headers.get("Last-Modified"))
+            if self.validators is not None and validators != self.validators:
+                raise ValueError("remote file changed while reading")
+            self.validators = validators
             data = response.read(end - start + 2)
         if len(data) != end - start + 1:
             raise ValueError("range response length does not match Content-Range")

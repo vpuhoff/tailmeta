@@ -4,8 +4,24 @@ Store version information and metadata in the trailer of a built file. Assign
 versions after building, read them without running the application, and update
 them without rebuilding. Ed25519 signing is optional.
 
-Requires Python 3.10+. The base installation has no third-party dependencies.
-Published on [PyPI](https://pypi.org/project/tailmeta/).
+Requires Python 3.10+. Published on [PyPI](https://pypi.org/project/tailmeta/).
+The binary format is specified in [SPEC.md](SPEC.md).
+
+## Principles
+
+- **No mandatory third-party dependencies.** Reading, writing, stripping,
+  inspecting and HTTP reads use only the Python standard library.
+- **Cryptography is optional.** Signing and verification need the `signing`
+  extra (`cryptography`); everything else works without it.
+- **No home-grown cryptography.** Signatures are Ed25519 from a maintained
+  library; tailmeta only defines what is signed.
+- **A minimal dependency tree.** The optional extra adds one direct
+  dependency.
+- **An open binary format.** [SPEC.md](SPEC.md) describes every byte, with test
+  vectors, so the format does not depend on this implementation.
+- **Independent implementations are possible.** Verification needs no JSON
+  canonicalization: signatures cover the stored bytes, so a reader in any
+  language with an Ed25519 and SHA-256 library can verify a file.
 
 ## Installation
 
@@ -47,8 +63,9 @@ and verification errors also produce exit code 1.
 uses it as the metadata. `--version`, `--commit` and `--channel` override the
 fields of the same name, and `--version` may be omitted when the file provides
 it. The file must be UTF-8 JSON of at most 1 MiB without duplicate keys.
-`stamp` always writes trailer format v2 (`--format 2` is accepted for
-explicitness). A file with a legacy v1 trailer is refused (see below).
+`stamp` always writes trailer format v3 (`--format 3` is accepted for
+explicitness) and replaces a v2 trailer with a v3 one. A file with a retired
+v1 trailer is refused (see below).
 
 `strip` removes the trailer and restores the original bytes, using the same
 atomic replacement as `stamp`. A file without a trailer is left untouched
@@ -56,12 +73,12 @@ atomic replacement as `stamp`. A file without a trailer is left untouched
 because its boundaries cannot be trusted.
 
 `inspect` prints a diagnostic report: file and content sizes, trailer offset
-and size, format version, CRC32 (v2), whether the JSON is canonical, whether
-the trailer is signed, the SHA-256 of the content and whether it matches the
-`sha256` field, and the field names. Damaged trailers are reported with the
-step that failed instead of only an error message. `--json` prints the report
-as JSON, `--no-hash` skips hashing large files. The exit code is 0 only for a
-valid trailer. A matching `sha256` shows integrity, not authenticity: use
+and size, format version, CRC32, whether the JSON is canonical, whether the
+trailer is signed and with which algorithms (v3), the SHA-256 of the content
+and, for v2, whether it matches the `sha256` field, and the field names.
+Damaged trailers are reported with the step that failed instead of only an
+error message. `--json` prints the report as JSON, `--no-hash` skips hashing
+large files. The exit code is 0 only for a valid trailer. A matching `sha256` shows integrity, not authenticity: use
 `verify` for that.
 
 `read` also accepts an `http://` or `https://` URL. The trailer is read with
@@ -71,6 +88,15 @@ answer with `206 Partial Content`; servers that ignore `Range` or compress the
 response are rejected instead of downloading the whole file. `--timeout`
 sets the network timeout in seconds (default 30). Signatures cannot be
 verified this way, since `verify` hashes the full content.
+
+The requests must all see the same file. A strong `ETag` from the first
+response is sent back in `If-Range`, so a server whose file was replaced
+answers `200` and the read is aborted. Every response must also repeat the
+`ETag`, `Last-Modified` and total size of the first one; any difference,
+including a header that appears or disappears, raises `remote file changed
+while reading`. This covers weak ETags and servers that ignore `If-Range`.
+Behind a CDN or load balancer whose nodes report different ETags for the same
+file, reads that need a second request fail rather than risk mixing versions.
 
 ## Python API
 
@@ -87,7 +113,7 @@ required nonempty `version` string and optional additional JSON fields.
 The `version` string must not contain control or formatting characters
 (Unicode categories Cc, Cf, Zl, Zp: newlines, escape sequences, bidi
 overrides); trailers with such a version are rejected on read as well.
-`sha256` and `signature` are reserved and generated during signing.
+`sha256` and `signature` are reserved field names.
 `read_metadata(path=None)` returns a dictionary, or `None` if no trailer is found.
 A recognized but malformed trailer raises `ValueError`; file errors raise
 `OSError`. Paths may be strings or `pathlib.Path` objects.
@@ -101,13 +127,14 @@ strip("app.bin")                       # True if a trailer was removed
 read_metadata_url("https://example.com/app.bin", timeout=10)
 ```
 
-`stamp(..., format_version=None)` writes v2; `format_version=2` is the only
+`stamp(..., format_version=None)` writes v3; `format_version=3` is the only
 accepted value. `inspect(path, compute_hash=True)` never raises on a
 damaged trailer: `status` is `absent`, `valid`, `invalid` or `unsupported`,
 and `error` explains the last two. `read_metadata_url(url, timeout=30)` returns
 the same untrusted data as `read_metadata`; network errors raise `OSError`.
 A v1 trailer, or one with an unknown format version or flags, raises
-`UnsupportedFormatError`, a subclass of `ValueError`.
+`UnsupportedFormatError`, a subclass of `ValueError`. Metadata with duplicate
+keys is rejected as malformed.
 
 ### Reading the running executable
 
@@ -150,10 +177,21 @@ metadata = verify("app.bin", public_key="public.pem")
 
 Install the `signing` extra to use these operations. Without it, version reads
 and writes still work; signing operations report the missing dependency.
-`verify` checks the signature over all metadata fields and the SHA-256 hash of
-the original file content, then returns the verified fields without
-`signature`. Unsigned files are rejected, as are signed trailers whose JSON
-bytes differ from the canonical encoding described below.
+`verify` checks the Ed25519 signature over the stored metadata bytes and the
+SHA-256 hash of the original content, then returns the verified fields plus
+`sha256`, the hex digest of the verified content. Unsigned files are rejected.
+
+In v3 the signature is not part of the JSON. It lives in a binary signature
+block after the metadata, tagged with an algorithm identifier (`0x0001` =
+Ed25519 over SHA-256), and signs the metadata bytes exactly as stored, so no
+JSON canonicalization is involved. The algorithm is chosen by the verifier's
+key, never by the file. A block may hold several signatures (key rotation, a
+future second algorithm); `verify` accepts the file if one of the entries for
+its algorithm is valid and ignores the others.
+
+Signatures written by tailmeta 0.3.x (format v2, inside the JSON) are not
+verified: `verify` raises `UnsupportedFormatError`. Stamp the file again with
+the private key to sign it in v3.
 
 Ed25519 keys use PEM encoding. Private keys are created unencrypted with mode
 0600. `keygen` refuses to overwrite existing keys.
@@ -181,21 +219,28 @@ signature.
 
 ## Trailer formats
 
+The full byte-level specification, including the signature algorithm registry,
+the signed message, verification rules and test vectors, is in
+[SPEC.md](SPEC.md). In short:
+
 ```text
+v3: [original file][UTF-8 JSON][signature block][CRC32: uint32][JSON length: uint32]
+    [signature block length: uint32][format: uint16 = 3][flags: uint16 = 0][TAILMETV]
+signature block: zero or more [algorithm: uint16][length: uint32][signature]
 v2: [original file][UTF-8 JSON][CRC32: uint32][length: uint32][format: uint16 = 2][flags: uint16 = 0][TAILMETV]
 ```
 
 All integers are big endian. v2 and every later format end with `TAILMETV`,
-preceded by the format version and flags: these last 12 bytes keep the same layout in all
-future versions, so a reader always learns the version before interpreting
-anything else. The layout before them belongs to the specific version.
-In v2 the CRC32 (zlib polynomial) covers the JSON bytes and detects
-corruption that still leaves valid JSON. Flags are reserved; v2 requires
-zero.
+preceded by the format version and flags: these last 12 bytes keep the same
+layout in all future versions, so a reader always learns the version before
+interpreting anything else. The CRC32 detects accidental damage; it covers the
+JSON and, in v3, the signature block. Flags are reserved and must be zero.
 
 A reader that finds `TAILMETV` with a format version or flags it does not
 know raises `UnsupportedFormatError`. `stamp` and `strip` refuse such files
-instead of discarding data written by a newer release.
+instead of discarding data written by a newer release. New signature
+algorithms do not need a new format version: readers skip entries with
+identifiers they do not know.
 
 ### Legacy v1
 
@@ -209,31 +254,33 @@ migrate a v1 file, strip it with tailmeta < 0.4 and stamp it again.
 
 ### Compatibility matrix
 
-| Trailer in the file       | tailmeta ≤ 0.1.5           | this release              |
-|---------------------------|----------------------------|---------------------------|
-| none                      | read: not found            | read: not found           |
-| v1 (`TAILMETA`)           | read, stamp, verify        | `UnsupportedFormatError`; stamp/strip refuse |
-| v2 (`TAILMETV`, format 2) | treated as absent¹         | read, stamp, strip, inspect, verify |
-| `TAILMETV`, format ≥ 3    | treated as absent¹         | `UnsupportedFormatError`; stamp/strip refuse |
+| Trailer in the file       | tailmeta ≤ 0.1.5    | 0.3.x                   | this release              |
+|---------------------------|---------------------|-------------------------|---------------------------|
+| none                      | read: not found     | read: not found         | read: not found           |
+| v1 (`TAILMETA`)           | read, stamp, verify | read, stamp, verify     | `UnsupportedFormatError`; stamp/strip refuse |
+| v2 (`TAILMETV`, format 2) | treated as absent¹  | read, stamp, verify     | read, strip, inspect; stamp writes v3; verify refuses |
+| v3 (`TAILMETV`, format 3) | treated as absent¹  | `UnsupportedFormatError` | read, stamp, strip, inspect, verify |
+| `TAILMETV`, format ≥ 4    | treated as absent¹  | `UnsupportedFormatError` | `UnsupportedFormatError`; stamp/strip refuse |
 
 tailmeta 0.2.0 wrote v1 by default, 0.3.0 switched new trailers to v2, and
-current releases write only v2.
+current releases write only v3. Consumers on 0.3.x refuse v3 files with an
+error instead of misreading them; upgrade readers before stamping releases
+with this version.
 
 ¹ Older releases do not know the `TAILMETV` magic: `read` reports that no
-metadata was found, and `stamp` appends a v1 trailer after the v2 one instead
+metadata was found, and `stamp` appends a v1 trailer after the newer one instead
 of replacing it. Consumers still on ≤ 0.1.5 must be upgraded.
 
-`tests/test_formats.py` contains the exact bytes of v2, which must keep
-reading in every release, and of v1, which must keep being refused.
+`tests/test_formats.py` contains the exact bytes of v3 (unsigned and signed
+with the RFC 8032 test key) and v2, which must keep reading in every release,
+and of v1, which must keep being refused.
 
 ### Encoding
 
-JSON is limited to 1 MiB. Keys are sorted, and serialization uses
-`ensure_ascii=False`, `allow_nan=False`, and `separators=(",", ":")`.
-The signed message is `b"TAILMETA\x00" + JSON`, excluding the `signature` field.
-This uses Python JSON serialization, not JCS. The signature is Base64-encoded;
-`sha256` is the hexadecimal SHA-256 digest of the original content before the
-JSON trailer.
+JSON is limited to 1 MiB and the signature block to 64 KiB. `stamp` sorts
+keys and serializes with `ensure_ascii=False`, `allow_nan=False` and
+`separators=(",", ":")`, so the same metadata always produces the same bytes.
+v3 verification does not depend on this encoding.
 
 Writing copies the original content into a temporary file in the same directory
 and atomically replaces the destination, preserving its permission bits.

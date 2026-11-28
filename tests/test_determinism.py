@@ -84,7 +84,10 @@ class DeterminismTests(unittest.TestCase):
         yield run('api: stamp twice', lambda p: stamp(p, META, **api), lambda p: stamp(p, META, **api))
         yield run('api: over a different trailer', lambda p: stamp(p, {'version': '0.0.1', 'junk': 'x' * 5000}),
                   lambda p: stamp(p, META, **api))
-        yield run('cli: --format 2', lambda p: self.cli('stamp', p, '--metadata', files['indented'], '--format', '2', *cli))
+        yield run('cli: --format 3', lambda p: self.cli('stamp', p, '--metadata', files['indented'], '--format', '3', *cli))
+        yield run('api: over a v2 trailer', lambda p: p.write_bytes(p.read_bytes() + b'{"version":"0"}'
+                                                                  + encode_footer(b'{"version":"0"}', 2)),
+                  lambda p: stamp(p, META, **api))
         yield run('api: stamp, strip, stamp', lambda p: stamp(p, META, **api), strip, lambda p: stamp(p, META, **api))
         yield run('cli: stamp, strip, stamp', lambda p: self.cli('stamp', p, '--metadata', files['indented']),
                   lambda p: self.cli('strip', p), lambda p: self.cli('stamp', p, '--metadata', files['indented'], *cli))
@@ -107,22 +110,22 @@ class DeterminismTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(sha(path), expected)
 
-    def test_unsigned_v2_paths_are_identical(self):
+    def test_unsigned_paths_are_identical(self):
         data = encode_metadata(META)
-        expected = hashlib.sha256(self.base.read_bytes() + data + encode_footer(data, 2)).hexdigest()
+        expected = hashlib.sha256(self.base.read_bytes() + data + encode_footer(data, 3)).hexdigest()
         self.assert_identical(self.scenarios(), expected)
 
     @unittest.skipUnless(HAS_SIGNING, 'requires signing extra')
-    def test_signed_v2_paths_are_identical(self):
+    def test_signed_paths_are_identical(self):
         self.assert_identical(self.scenarios(self.key))
 
     def test_strip_restores_original_bytes(self):
         steps = {
-            'unsigned v2': lambda p: stamp(p, META),
+            'unsigned': lambda p: stamp(p, META),
             'cli': lambda p: self.cli('stamp', p, *FLAGS),
         }
         if HAS_SIGNING:
-            steps['signed v2'] = lambda p: stamp(p, META, private_key=self.key)
+            steps['signed'] = lambda p: stamp(p, META, private_key=self.key)
         scenarios = []
         for name, step in steps.items():
             path = self.fresh()

@@ -8,7 +8,10 @@ import unittest
 import zlib
 from pathlib import Path
 from unittest.mock import patch
+import io
 
+from tailmeta import _core
+from tailmeta._core import encode_signatures
 from tailmeta._core import FOOTER_V2, MAGIC_VERSIONED, MAX_METADATA, encode_footer, encode_metadata, read_metadata, stamp
 
 
@@ -31,7 +34,7 @@ class TailTests(unittest.TestCase):
             stamp(self.path, metadata)
             self.assertEqual(read_metadata(self.path), metadata)
             data = encode_metadata(metadata)
-            self.assertEqual(self.path.read_bytes(), self.base + data + encode_footer(data, 2))
+            self.assertEqual(self.path.read_bytes(), self.base + data + encode_footer(data, 3))
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o755)
 
     def test_corruption_is_rejected_without_modification(self):
@@ -122,13 +125,23 @@ class SignedTailTests(TailTests):
             metadata = verify(self.path, self.public)
             self.assertEqual(metadata['version'], version)
             self.assertEqual(metadata['sha256'], hashlib.sha256(self.base).hexdigest())
+            self.assertNotIn('sha256', read_metadata(self.path), 'v3 keeps the hash out of the JSON')
             data = encode_metadata(read_metadata(self.path))
-            self.assertEqual(self.path.read_bytes(), self.base + data + encode_footer(data, 2))
+            content = self.path.read_bytes()
+            self.assertEqual(content[:len(self.base) + len(data)], self.base + data)
+            self.assertEqual(content[len(self.base) + len(data):len(self.base) + len(data) + 6], b'\x00\x01\x00\x00\x00\x40')
+
+    def resign(self, data, signatures):
+        """Собрать трейлер v3 с корректным CRC вокруг произвольных данных и подписей."""
+        block = encode_signatures(signatures)
+        self.path.write_bytes(self.base + data + block + encode_footer(data, 3, block))
 
     def test_tampering(self):
         from tailmeta._core import verify, generate_keys
         stamp(self.path, {'version': '1.2.4'}, self.private)
         original = self.path.read_bytes()
+        trailer = _core._read(io.BytesIO(original))[1]
+        (algorithm, signature), = trailer['signatures']
         variants = [b'X' + original[1:], original.replace(b'1.2.4', b'9.9.9'), self.base, original[:-1]]
         metadata = read_metadata(self.path)
         metadata['signature'] = '!' * 88
@@ -138,6 +151,19 @@ class SignedTailTests(TailTests):
             self.path.write_bytes(value)
             with self.assertRaises(ValueError):
                 verify(self.path, self.public)
+        for data, signatures, message in (
+            (b'{"version":"9.9.9"}', [(algorithm, signature)], 'verification failed'),
+            (trailer['raw'], [(algorithm, signature[:-1] + bytes([signature[-1] ^ 1]))], 'verification failed'),
+            (trailer['raw'], [(algorithm, signature[:32])], 'verification failed'),
+            (trailer['raw'], [(0x0002, signature)], 'no signature for algorithm ed25519'),
+            (trailer['raw'], [], 'signed metadata required'),
+        ):
+            self.resign(data, signatures)
+            with self.assertRaisesRegex(ValueError, message):
+                verify(self.path, self.public)
+        # Entries of other algorithms are skipped, not treated as failures.
+        self.resign(trailer['raw'], [(0x0002, signature), (algorithm, signature)])
+        self.assertEqual(verify(self.path, self.public)['version'], '1.2.4')
         self.path.write_bytes(original)
         other_private = self.private.with_name('other-private.pem')
         other_public = self.public.with_name('other-public.pem')
@@ -148,22 +174,32 @@ class SignedTailTests(TailTests):
         with self.assertRaises(ValueError):
             verify(self.path, self.public)
 
-    def test_non_canonical_signed_trailer_is_rejected(self):
-        from tailmeta._core import verify
-        stamp(self.path, {'version': '1.2.4', 'channel': 'stable'}, self.private)
-        metadata = read_metadata(self.path)
-        variants = [
-            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-            json.dumps(metadata, separators=(',', ':'), sort_keys=True).replace('stable', '\\u0073table'),
-            json.dumps(dict(reversed(list(metadata.items()))), separators=(',', ':')),
-        ]
-        for text in variants:
-            data = text.encode()
-            self.assertEqual(json.loads(data), metadata)
-            self.path.write_bytes(self.base + data + encode_footer(data, 2))
-            self.assertEqual(read_metadata(self.path), metadata)
-            with self.assertRaisesRegex(ValueError, 'canonically'):
-                verify(self.path, self.public)
+    def test_several_signatures(self):
+        from tailmeta._core import generate_keys, verify
+        other_private = self.private.with_name('other-private.pem')
+        other_public = self.public.with_name('other-public.pem')
+        generate_keys(other_private, other_public)
+        stamp(self.path, {'version': '1'}, self.private)
+        first = _core._read(io.BytesIO(self.path.read_bytes()))[1]
+        stamp(self.path, {'version': '1'}, other_private)
+        second = _core._read(io.BytesIO(self.path.read_bytes()))[1]
+        self.resign(first['raw'], first['signatures'] + second['signatures'])
+        for public in (self.public, other_public):
+            self.assertEqual(verify(self.path, public)['version'], '1')
+
+    def test_non_canonical_json_is_signed_as_is(self):
+        """v3 подписывает байты как есть: каноническая запись не требуется."""
+        from tailmeta._core import load_key, signed_message_v3, verify
+        data = b'{ "version" : "1.2.4",\n  "channel": "\\u0073table" }'
+        digest = hashlib.sha256(self.base).digest()
+        signature = load_key(self.private, private=True).sign(signed_message_v3(_core.ED25519, digest, data))
+        self.resign(data, [(_core.ED25519, signature)])
+        self.assertEqual(verify(self.path, self.public),
+                         {'version': '1.2.4', 'channel': 'stable', 'sha256': digest.hex()})
+        self.assertFalse(_core.inspect(self.path)['canonical'])
+        self.resign(data.replace(b'\n', b' '), [(_core.ED25519, signature)])
+        with self.assertRaisesRegex(ValueError, 'verification failed'):
+            verify(self.path, self.public)
 
     def test_key_files_and_reserved_fields(self):
         from tailmeta._core import generate_keys
@@ -200,19 +236,6 @@ class SignedTailTests(TailTests):
             load_key(rsa_private, private=True)
         with self.assertRaisesRegex(ValueError, 'Ed25519'):
             load_key(rsa_public, private=False)
-
-    def test_non_string_signature_is_rejected(self):
-        from tailmeta._core import verify
-
-        metadata = {
-            'version': '1',
-            'sha256': hashlib.sha256(self.base).hexdigest(),
-            'signature': 12345,
-        }
-        data = encode_metadata(metadata)
-        self.path.write_bytes(self.base + data + encode_footer(data, 2))
-        with self.assertRaisesRegex(ValueError, 'invalid signature encoding'):
-            verify(self.path, self.public)
 
     def test_binary_truncated_during_verification(self):
         from tailmeta._core import verify
