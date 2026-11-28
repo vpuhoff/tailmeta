@@ -3,7 +3,7 @@ import argparse
 import json
 import sys
 from . import __version__
-from ._core import FORMAT_VERSIONS, MAX_METADATA, generate_keys, inspect, is_unsafe_char, read_metadata, stamp, strip, verify
+from ._core import DEFAULT_FORMAT, FORMAT_VERSIONS, MAX_METADATA, generate_keys, inspect, is_unsafe_char, read_metadata, stamp, strip, verify
 from ._http import read_metadata_url
 
 
@@ -71,12 +71,18 @@ def format_report(report):
         lines.append(("content size", report["content_size"]))
     if "trailer_offset" in report:
         lines.append(("trailer offset", report["trailer_offset"]))
-        lines.append(("trailer size", f'{report["trailer_size"]} (metadata {report["metadata_length"]} + footer {report["footer_size"]})'))
+        parts = [f'metadata {report["metadata_length"]}']
+        if "signature_length" in report:
+            parts.append(f'signatures {report["signature_length"]}')
+        parts.append(f'footer {report["footer_size"]}')
+        lines.append(("trailer size", f'{report["trailer_size"]} ({" + ".join(parts)})'))
     if "crc32" in report:
         lines.append(("crc32", report["crc32"]))
     if "canonical" in report:
         lines.append(("canonical JSON", yes(report["canonical"])))
         lines.append(("signed", yes(report["signed"])))
+    for entry in report.get("signatures", ()):
+        lines.append(("signature", f'{entry["name"]} (algorithm {entry["algorithm"]:#06x}, {entry["length"]} bytes)'))
     if "content_sha256" in report:
         lines.append(("content sha256", report["content_sha256"]))
     if "sha256_matches" in report:
@@ -97,7 +103,7 @@ def main():
     writer.add_argument("--commit")
     writer.add_argument("--channel")
     writer.add_argument("--metadata", metavar="FILE", help='JSON object with metadata fields ("-" reads stdin); flags override its fields')
-    writer.add_argument("--format", type=int, choices=FORMAT_VERSIONS, help="trailer format version (default: 2)")
+    writer.add_argument("--format", type=int, choices=FORMAT_VERSIONS, help=f"trailer format version (default: {DEFAULT_FORMAT})")
     writer.add_argument("--private-key", help="optionally sign with an Ed25519 private PEM key")
     checker = commands.add_parser("verify", help="verify a signed trailer")
     checker.add_argument("path")

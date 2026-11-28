@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 from importlib.metadata import version as package_version
@@ -60,7 +61,7 @@ class CLITests(unittest.TestCase):
             run = lambda *args, **kw: self._run(directory, *args, **kw)
             source = root / 'metadata.json'
             source.write_text('{"version": "0.9", "build": {"n": 5}, "channel": "x"}', encoding='utf-8')
-            result = run('stamp', path, '--metadata', source, '--channel', 'beta', '--format', '2')
+            result = run('stamp', path, '--metadata', source, '--channel', 'beta', '--format', '3')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(run('read', path).stdout), {'version': '0.9', 'build': {'n': 5}, 'channel': 'beta'})
             result = run('stamp', path, '--metadata', '-', '--version', '1.0', input='{"commit": "abc"}')
@@ -69,11 +70,13 @@ class CLITests(unittest.TestCase):
 
             result = run('inspect', path)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertRegex(result.stdout, r'format version: +2')
+            self.assertRegex(result.stdout, r'format version: +3')
+            self.assertRegex(result.stdout, r'trailer size: +\d+ \(metadata \d+ \+ signatures 0 \+ footer 24\)')
+            self.assertIn('invalid choice', run('stamp', path, '--version', '1', '--format', '2').stderr)
             self.assertRegex(result.stdout, r'crc32: +[0-9a-f]{8}')
             self.assertRegex(result.stdout, r'version: +1\.0')
             report = json.loads(run('inspect', path, '--json', '--no-hash').stdout)
-            self.assertEqual((report['status'], report['format_version']), ('valid', 2))
+            self.assertEqual((report['status'], report['format_version']), ('valid', 3))
             self.assertNotIn('content_sha256', report)
 
             result = run('strip', path)
@@ -118,7 +121,7 @@ class CLITests(unittest.TestCase):
         from http.server import ThreadingHTTPServer
         import threading
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-        server.body, server.mode, server.ranges = trailer({'version': '7.1'}, size=100), 'ok', []
+        server.body, server.mode, server.ranges, server.if_range = trailer({'version': '7.1'}, size=100), 'ok', [], []
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -160,6 +163,10 @@ class CLITests(unittest.TestCase):
             self.assertEqual(payload['channel'], 'stable')
             self.assertEqual(payload['commit'], 'abc123')
             self.assertNotIn('signature', payload)
+            self.assertEqual(payload['sha256'], hashlib.sha256(b'original data').hexdigest())
+            result = run('inspect', path)
+            self.assertRegex(result.stdout, r'signature: +ed25519 \(algorithm 0x0001, 64 bytes\)')
+            self.assertRegex(result.stdout, r'signed: +yes')
 
             missing = run('verify', path, '--public-key', root / 'missing.pem')
             self.assertEqual(missing.returncode, 1)

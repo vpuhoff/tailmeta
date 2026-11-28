@@ -1,12 +1,13 @@
 """Sign and verify a disposable copy of the actual compiled onefile."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-from tailmeta._core import encode_footer, encode_metadata, read_metadata
+from tailmeta._core import encode_metadata, read_metadata
 
 
 def check(condition, message):
@@ -64,11 +65,12 @@ with tempfile.TemporaryDirectory(prefix='onefile-test-') as directory:
     print('PASS: unsigned binary rejected')
     for version in ('1.2.4', '2.0', '3.0.0'):
         cli('stamp', binary, '--version', version, '--channel', 'тест' * 100, '--private-key', private)
-        cli('verify', binary, '--public-key', public)
-        metadata = read_metadata(binary)
-        check(metadata['sha256'] == hashlib.sha256(base).hexdigest(), 'hash mismatch')
-        data = encode_metadata(metadata)
-        check(binary.read_bytes() == base + data + encode_footer(data, 2), 'payload changed or trailers accumulated')
+        verified = json.loads(cli('verify', binary, '--public-key', public))
+        check(verified['sha256'] == hashlib.sha256(base).hexdigest(), 'hash mismatch')
+        data = encode_metadata(read_metadata(binary))
+        stamped = binary.read_bytes()
+        check(stamped[:len(base) + len(data)] == base + data, 'payload changed')
+        check(len(stamped) == len(base) + len(data) + 6 + 64 + 24, 'trailers accumulated')
         run(binary, version)
         print(f'PASS: signed {version}, verified outside/inside, original bytes preserved')
     signed = binary.read_bytes()

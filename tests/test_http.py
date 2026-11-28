@@ -10,9 +10,9 @@ from tailmeta import _http
 from tailmeta._core import encode_footer, encode_metadata
 
 
-def trailer(metadata, size=0):
+def trailer(metadata, size=0, format_version=3):
     data = encode_metadata(metadata)
-    return b'x' * size + data + encode_footer(data, 2)
+    return b'x' * size + data + encode_footer(data, format_version)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -22,10 +22,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         server = self.server
         server.ranges.append(self.headers.get('Range'))
+        server.if_range.append(self.headers.get('If-Range'))
         body = server.body
         mode = server.mode
         if mode == 'no-range':
             return self._send(200, body)
+        second = len(server.ranges) > 1
+        validators = {}
+        if mode in ('etag', 'etag-change', 'etag-change-ignored', 'etag-vanish'):
+            validators['ETag'] = '"v2"' if second and mode != 'etag' else '"v1"'
+            if mode == 'etag-vanish' and second:
+                del validators['ETag']
+        elif mode == 'weak-etag':
+            validators['ETag'] = 'W/"v2"' if second else 'W/"v1"'
+        elif mode == 'last-modified':
+            validators['Last-Modified'] = 'Thu, 02 Jan 2025 00:00:00 GMT' if second else 'Wed, 01 Jan 2025 00:00:00 GMT'
+        if_range = self.headers.get('If-Range')
+        if if_range and mode != 'etag-change-ignored' and if_range != validators.get('ETag'):
+            # RFC 9110: a failed If-Range returns the whole current representation.
+            return self._send(200, body, validators)
         match = re.fullmatch(r'bytes=(\d*)-(\d*)', self.headers.get('Range', ''))
         size = len(body)
         if match.group(1):
@@ -51,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
             headers['Content-Range'] = f'bytes {start + 1}-{end + 1}/{size}'
         elif mode == 'grow' and len(server.ranges) > 1:
             headers['Content-Range'] = f'bytes {start}-{end}/{size + 1}'
-        self._send(206, chunk, headers)
+        self._send(206, chunk, {**headers, **validators})
 
     def _send(self, status, body, headers=()):
         self.send_response(status)
@@ -75,7 +90,7 @@ class HTTPTests(unittest.TestCase):
         cls.server.server_close()
 
     def serve(self, body, mode='ok'):
-        self.server.body, self.server.mode, self.server.ranges = body, mode, []
+        self.server.body, self.server.mode, self.server.ranges, self.server.if_range = body, mode, [], []
 
     def test_small_trailer_uses_one_request(self):
         self.serve(trailer({'version': '1.2.4'}, size=10 * 1024 * 1024))
@@ -87,6 +102,26 @@ class HTTPTests(unittest.TestCase):
         self.serve(trailer(metadata, size=1000))
         self.assertEqual(read_metadata_url(self.url), metadata)
         self.assertEqual(len(self.server.ranges), 2)
+
+    def test_v2_trailer(self):
+        self.serve(trailer({'version': '2.0'}, size=100, format_version=2))
+        self.assertEqual(read_metadata_url(self.url), {'version': '2.0'})
+
+    def test_matching_etag_is_sent_in_if_range(self):
+        metadata = {'version': '2', 'notes': 'n' * (_http.TAIL_BLOCK * 2)}
+        self.serve(trailer(metadata, size=1000), 'etag')
+        self.assertEqual(read_metadata_url(self.url), metadata)
+        self.assertEqual(self.server.if_range, [None, '"v1"'])
+
+    def test_file_replaced_between_requests(self):
+        metadata = {'version': '1', 'notes': 'n' * _http.TAIL_BLOCK}
+        for mode in ('etag-change', 'etag-change-ignored', 'etag-vanish', 'weak-etag', 'last-modified'):
+            self.serve(trailer(metadata), mode)
+            with self.assertRaisesRegex(ValueError, 'remote file changed', msg=mode):
+                read_metadata_url(self.url)
+            self.assertEqual(len(self.server.ranges), 2, mode)
+            if mode == 'weak-etag':
+                self.assertEqual(self.server.if_range, [None, None], 'weak ETags are not sent in If-Range')
 
     def test_small_and_empty_files(self):
         for body in (b'', b'abc', trailer({'version': '3'})):
