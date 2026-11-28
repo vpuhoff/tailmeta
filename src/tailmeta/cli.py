@@ -97,7 +97,7 @@ def main():
     writer.add_argument("--commit")
     writer.add_argument("--channel")
     writer.add_argument("--metadata", metavar="FILE", help='JSON object with metadata fields ("-" reads stdin); flags override its fields')
-    writer.add_argument("--format", type=int, choices=FORMAT_VERSIONS, help="trailer format version (default: keep the current one, else 2)")
+    writer.add_argument("--format", type=int, choices=FORMAT_VERSIONS, help="trailer format version (default: 2)")
     writer.add_argument("--private-key", help="optionally sign with an Ed25519 private PEM key")
     checker = commands.add_parser("verify", help="verify a signed trailer")
     checker.add_argument("path")

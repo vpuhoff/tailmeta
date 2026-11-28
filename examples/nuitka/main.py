@@ -6,15 +6,13 @@ attacker who can replace this binary can also remove the check. Verify from a
 trusted component (installer, updater) that holds its own public key.
 """
 import argparse
-import os
 import sys
-from pathlib import Path
 from tailmeta import read_metadata, verify
 
 
 def get_embedded_version(public_key=None):
-    path = Path(os.environ.get("NUITKA_ONEFILE_BINARY", sys.argv[0])).resolve()
-    metadata = verify(path, public_key) if public_key else read_metadata(path)
+    # Without a path both functions read this executable itself.
+    metadata = verify(public_key=public_key) if public_key else read_metadata()
     return metadata["version"] if metadata else "unknown"
 
 

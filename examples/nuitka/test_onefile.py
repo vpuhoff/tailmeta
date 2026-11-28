@@ -20,17 +20,30 @@ def cli(*args, success=True):
     return result.stdout
 
 
-def run(path, expected=None, verify_signature=True):
+def launches(path):
+    """The same binary started by absolute path, by name from PATH, and via a symlink found in PATH,
+    each from an unrelated working directory, so self-detection cannot rely on cwd or argv as typed."""
     env = os.environ.copy()
-    env.pop('NUITKA_ONEFILE_BINARY', None)
-    command = [str(path)]
-    if verify_signature:
-        command += ["--public-key", str(path) + ".pub.pem"]
-    result = subprocess.run(command, cwd=path.parent, env=env, capture_output=True, text=True, timeout=60)
-    if expected is None:
-        check(result.returncode != 0 and 'verification failed:' in result.stderr, result.stdout + result.stderr)
-    else:
-        check(result.returncode == 0 and result.stdout.strip() == f'version={expected}', result.stdout + result.stderr)
+    link_dir = path.parent / 'links'
+    link_dir.mkdir(exist_ok=True)
+    link = link_dir / 'linked-app'
+    if not link.is_symlink():
+        link.symlink_to(path)
+    yield [str(path)], env
+    yield [path.name], {**env, 'PATH': f'{path.parent}{os.pathsep}{env["PATH"]}'}
+    yield [link.name], {**env, 'PATH': f'{link_dir}{os.pathsep}{env["PATH"]}'}
+
+
+def run(path, expected=None, verify_signature=True):
+    for command, env in launches(path):
+        if verify_signature:
+            command += ["--public-key", str(path) + ".pub.pem"]
+        result = subprocess.run(command, cwd=tempfile.gettempdir(), env=env, capture_output=True, text=True, timeout=60)
+        output = f'{command}: {result.stdout}{result.stderr}'
+        if expected is None:
+            check(result.returncode != 0 and 'verification failed:' in result.stderr, output)
+        else:
+            check(result.returncode == 0 and result.stdout.strip() == f'version={expected}', output)
 
 
 source = Path(sys.argv[1]).resolve()

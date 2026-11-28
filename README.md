@@ -47,8 +47,8 @@ and verification errors also produce exit code 1.
 uses it as the metadata. `--version`, `--commit` and `--channel` override the
 fields of the same name, and `--version` may be omitted when the file provides
 it. The file must be UTF-8 JSON of at most 1 MiB without duplicate keys.
-`stamp --format {1,2}` selects the trailer format (see below); without it the
-format of the existing trailer is kept, and new trailers use v2.
+`stamp` always writes trailer format v2 (`--format 2` is accepted for
+explicitness). A file with a legacy v1 trailer is refused (see below).
 
 `strip` removes the trailer and restores the original bytes, using the same
 atomic replacement as `stamp`. A file without a trailer is left untouched
@@ -88,7 +88,7 @@ The `version` string must not contain control or formatting characters
 (Unicode categories Cc, Cf, Zl, Zp: newlines, escape sequences, bidi
 overrides); trailers with such a version are rejected on read as well.
 `sha256` and `signature` are reserved and generated during signing.
-`read_metadata(path)` returns a dictionary, or `None` if no trailer is found.
+`read_metadata(path=None)` returns a dictionary, or `None` if no trailer is found.
 A recognized but malformed trailer raises `ValueError`; file errors raise
 `OSError`. Paths may be strings or `pathlib.Path` objects.
 
@@ -101,13 +101,36 @@ strip("app.bin")                       # True if a trailer was removed
 read_metadata_url("https://example.com/app.bin", timeout=10)
 ```
 
-`stamp(..., format_version=None)` keeps the current format, or uses v2 for a
-file without a trailer. `inspect(path, compute_hash=True)` never raises on a
+`stamp(..., format_version=None)` writes v2; `format_version=2` is the only
+accepted value. `inspect(path, compute_hash=True)` never raises on a
 damaged trailer: `status` is `absent`, `valid`, `invalid` or `unsupported`,
 and `error` explains the last two. `read_metadata_url(url, timeout=30)` returns
 the same untrusted data as `read_metadata`; network errors raise `OSError`.
-A trailer with an unknown format version or flags raises
+A v1 trailer, or one with an unknown format version or flags, raises
 `UnsupportedFormatError`, a subclass of `ValueError`.
+
+### Reading the running executable
+
+Inside a compiled application, `read_metadata()` and
+`verify(public_key="public.pem")` can be called without a path: they read the
+application's own executable, as returned by `executable_path()`.
+
+```python
+from tailmeta import read_metadata
+
+metadata = read_metadata()   # this executable
+print(metadata["version"] if metadata else "unknown")
+```
+
+- **Nuitka** (onefile and standalone): `sys.argv[0]`. Nuitka replaces it with
+  the absolute, symlink-resolved path of the binary, also when the program is
+  started by name from `PATH`, through a symlink or with a custom `argv[0]`.
+  `sys.executable` and `__file__` are not used: in onefile mode they point to
+  the unpacked copy in a temporary directory, which has no trailer.
+- **PyInstaller, cx_Freeze** and other tools that set `sys.frozen`:
+  `sys.executable`.
+- **Plain Python**: there is no executable to read, so a missing path raises
+  `TypeError`.
 
 ## Optional signing
 
@@ -159,13 +182,11 @@ signature.
 ## Trailer formats
 
 ```text
-v1: [original file][UTF-8 JSON][length: uint32][TAILMETA]
 v2: [original file][UTF-8 JSON][CRC32: uint32][length: uint32][format: uint16 = 2][flags: uint16 = 0][TAILMETV]
 ```
 
-All integers are big endian. v1 ends with the magic bytes `TAILMETA` and has
-no version field. v2 and every later format end with `TAILMETV`, preceded by
-the format version and flags: these last 12 bytes keep the same layout in all
+All integers are big endian. v2 and every later format end with `TAILMETV`,
+preceded by the format version and flags: these last 12 bytes keep the same layout in all
 future versions, so a reader always learns the version before interpreting
 anything else. The layout before them belongs to the specific version.
 In v2 the CRC32 (zlib polynomial) covers the JSON bytes and detects
@@ -176,30 +197,34 @@ A reader that finds `TAILMETV` with a format version or flags it does not
 know raises `UnsupportedFormatError`. `stamp` and `strip` refuse such files
 instead of discarding data written by a newer release.
 
+### Legacy v1
+
+v1 (`[original file][UTF-8 JSON][length: uint32][TAILMETA]`, no checksum or
+version field) is deprecated and no longer supported. Its magic is still
+recognized, so a v1 trailer is never mistaken for the end of the content:
+`read`, `verify`, `stamp`, `strip` and the API raise `UnsupportedFormatError`
+and leave the file unchanged, and `inspect` reports `status: unsupported` with
+`format version: 1`. `--format 1` / `format_version=1` are rejected. To
+migrate a v1 file, strip it with tailmeta < 0.4 and stamp it again.
+
 ### Compatibility matrix
 
-| Trailer in the file       | tailmeta ≤ 0.1.5           | tailmeta ≥ 0.2            |
+| Trailer in the file       | tailmeta ≤ 0.1.5           | this release              |
 |---------------------------|----------------------------|---------------------------|
 | none                      | read: not found            | read: not found           |
-| v1 (`TAILMETA`)           | read, stamp, verify        | read, stamp, strip, inspect, verify |
+| v1 (`TAILMETA`)           | read, stamp, verify        | `UnsupportedFormatError`; stamp/strip refuse |
 | v2 (`TAILMETV`, format 2) | treated as absent¹         | read, stamp, strip, inspect, verify |
 | `TAILMETV`, format ≥ 3    | treated as absent¹         | `UnsupportedFormatError`; stamp/strip refuse |
 
-| tailmeta ≥ 0.3 writes       | when                                   |
-|-----------------------------|----------------------------------------|
-| v2                          | default for files without a trailer, or `--format 2` |
-| the existing trailer format | `stamp` without `--format`             |
-| v1                          | `--format 1` / `format_version=1`      |
-
-tailmeta 0.2.0 wrote v1 by default; since 0.3.0 new trailers use v2.
+tailmeta 0.2.0 wrote v1 by default, 0.3.0 switched new trailers to v2, and
+current releases write only v2.
 
 ¹ Older releases do not know the `TAILMETV` magic: `read` reports that no
 metadata was found, and `stamp` appends a v1 trailer after the v2 one instead
-of replacing it. Pass `--format 1` if a consumer still runs ≤ 0.1.5.
+of replacing it. Consumers still on ≤ 0.1.5 must be upgraded.
 
-The signature covers the JSON only, so a signed trailer stays valid when its
-footer is converted between v1 and v2. `tests/test_formats.py` contains the
-exact bytes of both formats; they must keep reading in every release.
+`tests/test_formats.py` contains the exact bytes of v2, which must keep
+reading in every release, and of v1, which must keep being refused.
 
 ### Encoding
 
@@ -219,7 +244,8 @@ from an absent trailer.
 
 ## Nuitka example
 
-`examples/nuitka/main.py` reads the version of its own onefile executable and
+`examples/nuitka/main.py` reads the version of its own onefile executable
+with `read_metadata()` (no path) and
 prints `unknown` when metadata is absent. Signature verification is enabled
 explicitly with `--public-key`. This demonstrates the API only: see the
 security model above for why self-verification does not stop tampering.

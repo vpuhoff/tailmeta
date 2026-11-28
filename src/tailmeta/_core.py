@@ -1,7 +1,10 @@
 """Форматы трейлера.
 
-v1: [данные][UTF-8 JSON][uint32 длина][TAILMETA]
 v2: [данные][UTF-8 JSON][uint32 CRC32][uint32 длина][uint16 версия][uint16 флаги][TAILMETV]
+
+Устаревший v1 ([данные][UTF-8 JSON][uint32 длина][TAILMETA]) больше не
+поддерживается: его магия распознаётся, и любая операция отказывает с
+UnsupportedFormatError, как для неизвестной версии.
 
 Последние 12 байт версионированного трейлера ([версия][флаги][TAILMETV])
 стабильны для всех будущих версий: читатель всегда может узнать версию
@@ -14,16 +17,17 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import sys
 import tempfile
 import unicodedata
 import zlib
 
+# Магия устаревшего v1; также префикс подписываемого сообщения.
 MAGIC = b"TAILMETA"
 MAGIC_VERSIONED = b"TAILMETV"
-FOOTER = struct.Struct(">I8s")
 FOOTER_V2 = struct.Struct(">IIHH8s")
 VERSION_TAIL = struct.Struct(">HH8s")
-FORMAT_VERSIONS = (1, 2)
+FORMAT_VERSIONS = (2,)
 DEFAULT_FORMAT = 2
 MAX_METADATA = 1024 * 1024
 CHUNK = 1024 * 1024
@@ -55,8 +59,6 @@ def encode_metadata(metadata):
 
 
 def encode_footer(data, format_version):
-    if format_version == 1:
-        return FOOTER.pack(len(data), MAGIC)
     if format_version == 2:
         return FOOTER_V2.pack(zlib.crc32(data), len(data), 2, 0, MAGIC_VERSIONED)
     raise UnsupportedFormatError(f"unsupported format version: {format_version!r}")
@@ -78,37 +80,34 @@ def _parse(stream, report=None):
     report = {} if report is None else report
     size = stream.seek(0, os.SEEK_END)
     report["file_size"] = size
-    if size < FOOTER.size:
+    if size < VERSION_TAIL.size:
         return None
-    stream.seek(-FOOTER.size, os.SEEK_END)
-    tail = _read_exact(stream, FOOTER.size)
+    stream.seek(-VERSION_TAIL.size, os.SEEK_END)
+    tail = _read_exact(stream, VERSION_TAIL.size)
     if tail[-8:] == MAGIC:
-        format_version, footer_size, checksum = 1, FOOTER.size, None
-        length, _ = FOOTER.unpack(tail)
-    elif tail[-8:] == MAGIC_VERSIONED:
-        format_version, flags, _ = VERSION_TAIL.unpack(tail)
-        report["format_version"] = format_version
-        if format_version != 2:
-            raise UnsupportedFormatError(f"unsupported format version: {format_version}")
-        if flags:
-            raise UnsupportedFormatError(f"unsupported trailer flags: {flags:#06x}")
-        footer_size = FOOTER_V2.size
-        if size < footer_size:
-            raise ValueError("invalid metadata length")
-        stream.seek(-footer_size, os.SEEK_END)
-        checksum, length, _, _, _ = FOOTER_V2.unpack(_read_exact(stream, footer_size))
-    else:
+        report["format_version"] = 1
+        raise UnsupportedFormatError("trailer format v1 is no longer supported")
+    if tail[-8:] != MAGIC_VERSIONED:
         return None
-    report.update(format_version=format_version, footer_size=footer_size, metadata_length=length)
-    if checksum is not None:
-        report["crc32"] = f"{checksum:08x}"
+    format_version, flags, _ = VERSION_TAIL.unpack(tail)
+    report["format_version"] = format_version
+    if format_version != 2:
+        raise UnsupportedFormatError(f"unsupported format version: {format_version}")
+    if flags:
+        raise UnsupportedFormatError(f"unsupported trailer flags: {flags:#06x}")
+    footer_size = FOOTER_V2.size
+    if size < footer_size:
+        raise ValueError("invalid metadata length")
+    stream.seek(-footer_size, os.SEEK_END)
+    checksum, length, _, _, _ = FOOTER_V2.unpack(_read_exact(stream, footer_size))
+    report.update(footer_size=footer_size, metadata_length=length, crc32=f"{checksum:08x}")
     if not 0 < length <= min(MAX_METADATA, size - footer_size):
         raise ValueError("invalid metadata length")
     start = size - footer_size - length
     report.update(content_size=start, trailer_offset=start, trailer_size=length + footer_size)
     stream.seek(start)
     raw = _read_exact(stream, length)
-    if checksum is not None and zlib.crc32(raw) != checksum:
+    if zlib.crc32(raw) != checksum:
         raise ValueError("metadata checksum mismatch")
     return {"format_version": format_version, "start": start, "raw": raw}
 
@@ -131,8 +130,36 @@ def _read(stream):
     return metadata, trailer["start"], canonical, trailer["format_version"]
 
 
-def read_metadata(path):
-    """Прочитать недоверенные данные без проверки подписи."""
+def _is_nuitka():
+    # __compiled__ есть в глобалах каждого модуля, скомпилированного Nuitka;
+    # __main__ проверяется на случай, если сам tailmeta не скомпилирован.
+    return "__compiled__" in globals() or hasattr(sys.modules.get("__main__"), "__compiled__")
+
+
+def executable_path():
+    """Путь к исполняемому файлу текущего собранного приложения.
+
+    Nuitka (onefile и standalone) подменяет sys.argv[0] абсолютным путём к
+    самому бинарнику, даже при запуске через PATH, симлинк или exec -a;
+    sys.executable в onefile указывает на распакованную копию во временной
+    папке, где трейлера нет. PyInstaller и cx_Freeze выставляют sys.frozen,
+    и sys.executable у них — внешний исполняемый файл. В обычном Python
+    бинарника нет, поэтому путь нужно передать явно.
+    """
+    if _is_nuitka():
+        return Path(sys.argv[0]).resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    raise TypeError("path is required when not running as a compiled Nuitka or frozen application")
+
+
+def read_metadata(path=None):
+    """Прочитать недоверенные данные без проверки подписи.
+
+    Без path читается собственный бинарник приложения (см. executable_path).
+    """
+    if path is None:
+        path = executable_path()
     with open(path, "rb") as stream:
         return _read(stream)[0]
 
@@ -222,8 +249,15 @@ def signing_bytes(metadata):
     return MAGIC + b"\x00" + encode_metadata(metadata)
 
 
-def verify(path, public_key):
-    """Проверить подпись всех полей и SHA-256 исходной части файла."""
+def verify(path=None, public_key=None):
+    """Проверить подпись всех полей и SHA-256 исходной части файла.
+
+    Без path проверяется собственный бинарник приложения (см. executable_path).
+    """
+    if public_key is None:
+        raise TypeError("verify() requires public_key")
+    if path is None:
+        path = executable_path()
     exceptions, _, _ = _crypto()
     key = load_key(public_key)
     with open(path, "rb") as stream:
@@ -285,8 +319,7 @@ def _rewrite(path, make_tail):
 def stamp(path, metadata, private_key=None, format_version=None):
     """Заменить существующий трейлер.
 
-    format_version=None сохраняет формат текущего трейлера, а для файла без
-    трейлера использует DEFAULT_FORMAT.
+    format_version=None означает DEFAULT_FORMAT.
     """
     data = encode_metadata(metadata)
     if "sha256" in metadata or "signature" in metadata:
@@ -296,7 +329,7 @@ def stamp(path, metadata, private_key=None, format_version=None):
     key = load_key(private_key, private=True) if private_key is not None else None
 
     def make_tail(digest, current_format):
-        chosen = format_version or current_format or DEFAULT_FORMAT
+        chosen = format_version or DEFAULT_FORMAT
         if digest is None:
             return b""
         payload = data

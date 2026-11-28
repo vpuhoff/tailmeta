@@ -7,6 +7,12 @@ import sys
 import tempfile
 import unittest
 
+from tailmeta._core import FOOTER_V2, MAGIC_VERSIONED, encode_footer
+
+
+def trailer(data):
+    return data + encode_footer(data, 2)
+
 
 class CLITests(unittest.TestCase):
     def _run(self, directory, *args, input=None):
@@ -80,15 +86,15 @@ class CLITests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertRegex(result.stdout, r'status: +absent')
 
-            path.write_bytes(b'data{"sha256":"00","version":1}\x00\x00\x00\x1bTAILMETA')
+            path.write_bytes(b'data' + trailer(b'{"sha256":"00","version":1}'))
             result = run('inspect', path)
             self.assertEqual(result.returncode, 1)
             self.assertIn('invalid metadata JSON', result.stdout)
-            path.write_bytes(b'data\x00\x00\x09\x99TAILMETA')
+            path.write_bytes(b'data' + FOOTER_V2.pack(0, 0x999, 2, 0, MAGIC_VERSIONED))
             result = run('inspect', path, '--no-hash')
             self.assertIn('invalid metadata length', result.stdout)
             self.assertNotIn('content size', result.stdout)
-            path.write_bytes(b'data{"sha256":"00","version":"1"}\x00\x00\x00\x1dTAILMETA')
+            path.write_bytes(b'data' + trailer(b'{"sha256":"00","version":"1"}'))
             self.assertIn('DOES NOT match', run('inspect', path).stdout)
 
             for content, message in (

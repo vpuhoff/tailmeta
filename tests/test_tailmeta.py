@@ -5,10 +5,11 @@ import os
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
-from tailmeta._core import FOOTER, MAGIC, MAX_METADATA, encode_footer, encode_metadata, read_metadata, stamp
+from tailmeta._core import FOOTER_V2, MAGIC_VERSIONED, MAX_METADATA, encode_footer, encode_metadata, read_metadata, stamp
 
 
 class TailTests(unittest.TestCase):
@@ -35,7 +36,7 @@ class TailTests(unittest.TestCase):
 
     def test_corruption_is_rejected_without_modification(self):
         for data, length in ((b'{}', 0), (b'{}', MAX_METADATA + 1), (b'{}', 999), (b'!!', 2), (b'{}', 2), (b'\xff', 1)):
-            original = self.base + data + FOOTER.pack(length, MAGIC)
+            original = self.base + data + FOOTER_V2.pack(zlib.crc32(data), length, 2, 0, MAGIC_VERSIONED)
             self.path.write_bytes(original)
             with self.assertRaises(ValueError):
                 read_metadata(self.path)
@@ -51,7 +52,7 @@ class TailTests(unittest.TestCase):
 
     def test_deeply_nested_json_is_value_error(self):
         data = b'{"version":"1","x":' + b'[' * 200000 + b']' * 200000 + b'}'
-        self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+        self.path.write_bytes(self.base + data + encode_footer(data, 2))
         with self.assertRaisesRegex(ValueError, 'invalid metadata JSON'):
             read_metadata(self.path)
         nested = []
@@ -66,7 +67,7 @@ class TailTests(unittest.TestCase):
                 stamp(self.path, {'version': version})
             self.assertEqual(self.path.read_bytes(), self.base)
             data = ('{"version":%s}' % json.dumps(version)).encode()
-            self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+            self.path.write_bytes(self.base + data + encode_footer(data, 2))
             with self.assertRaisesRegex(ValueError, 'invalid metadata JSON'):
                 read_metadata(self.path)
             self.path.write_bytes(self.base)
@@ -132,7 +133,7 @@ class SignedTailTests(TailTests):
         metadata = read_metadata(self.path)
         metadata['signature'] = '!' * 88
         data = encode_metadata(metadata)
-        variants.append(self.base + data + FOOTER.pack(len(data), MAGIC))
+        variants.append(self.base + data + encode_footer(data, 2))
         for value in variants:
             self.path.write_bytes(value)
             with self.assertRaises(ValueError):
@@ -159,7 +160,7 @@ class SignedTailTests(TailTests):
         for text in variants:
             data = text.encode()
             self.assertEqual(json.loads(data), metadata)
-            self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+            self.path.write_bytes(self.base + data + encode_footer(data, 2))
             self.assertEqual(read_metadata(self.path), metadata)
             with self.assertRaisesRegex(ValueError, 'canonically'):
                 verify(self.path, self.public)
@@ -209,7 +210,7 @@ class SignedTailTests(TailTests):
             'signature': 12345,
         }
         data = encode_metadata(metadata)
-        self.path.write_bytes(self.base + data + FOOTER.pack(len(data), MAGIC))
+        self.path.write_bytes(self.base + data + encode_footer(data, 2))
         with self.assertRaisesRegex(ValueError, 'invalid signature encoding'):
             verify(self.path, self.public)
 
@@ -237,6 +238,62 @@ class SignedTailTests(TailTests):
         with patch('builtins.open', open_and_truncate):
             with self.assertRaisesRegex(ValueError, 'binary truncated during verification'):
                 verify(self.path, self.public)
+
+
+class ExecutablePathTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / 'app'
+        self.path.write_bytes(b'\x7fELF payload')
+        stamp(self.path, {'version': '7.0'})
+        self.link = Path(self.directory.name) / 'link'
+        self.link.symlink_to(self.path)
+
+    def test_plain_python_requires_path(self):
+        from tailmeta import _core, executable_path
+        with patch.object(_core, '_is_nuitka', return_value=False), patch.object(sys, 'frozen', False, create=True):
+            with self.assertRaisesRegex(TypeError, 'path is required'):
+                executable_path()
+            with self.assertRaisesRegex(TypeError, 'path is required'):
+                read_metadata()
+
+    def test_nuitka_uses_argv0(self):
+        from tailmeta import _core
+        with patch.object(_core, '_is_nuitka', return_value=True), patch.object(sys, 'argv', [str(self.link)]):
+            self.assertEqual(_core.executable_path(), self.path.resolve())
+            self.assertEqual(read_metadata()['version'], '7.0')
+
+    def test_nuitka_detected_from_main_module(self):
+        from tailmeta import _core
+        main = type(sys)('__main__')
+        main.__compiled__ = object()
+        with patch.dict(sys.modules, {'__main__': main}):
+            self.assertTrue(_core._is_nuitka())
+        with patch.dict(sys.modules, {'__main__': type(sys)('__main__')}):
+            self.assertFalse(_core._is_nuitka())
+
+    def test_frozen_uses_executable(self):
+        from tailmeta import _core
+        with patch.object(_core, '_is_nuitka', return_value=False), patch.object(sys, 'frozen', True, create=True), \
+                patch.object(sys, 'executable', str(self.link)):
+            self.assertEqual(_core.executable_path(), self.path.resolve())
+            self.assertEqual(read_metadata()['version'], '7.0')
+
+    def test_verify_requires_public_key(self):
+        from tailmeta._core import verify
+        with self.assertRaisesRegex(TypeError, 'requires public_key'):
+            verify(self.path)
+
+    @unittest.skipUnless(importlib.util.find_spec("cryptography"), "requires signing extra")
+    def test_verify_defaults_to_own_binary(self):
+        from tailmeta import _core
+        private = Path(self.directory.name) / 'private.pem'
+        public = Path(self.directory.name) / 'public.pem'
+        _core.generate_keys(private, public)
+        stamp(self.path, {'version': '8.0'}, private)
+        with patch.object(_core, '_is_nuitka', return_value=True), patch.object(sys, 'argv', [str(self.link)]):
+            self.assertEqual(_core.verify(public_key=public)['version'], '8.0')
 
 
 if __name__ == '__main__':
