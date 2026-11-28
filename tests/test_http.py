@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 from tailmeta import read_metadata_url
 from tailmeta import _http
-from tailmeta._core import FOOTER, MAGIC, encode_metadata
+from tailmeta._core import encode_footer, encode_metadata
 
 
 def trailer(metadata, size=0):
     data = encode_metadata(metadata)
-    return b'x' * size + data + FOOTER.pack(len(data), MAGIC)
+    return b'x' * size + data + encode_footer(data, 2)
 
 
 class Handler(BaseHTTPRequestHandler):
